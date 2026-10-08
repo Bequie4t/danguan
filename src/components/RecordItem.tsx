@@ -36,8 +36,7 @@ export default function RecordItem({
   const [fail, setFail] = useState<FailReason | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const client = () => getBrowserClient() as unknown as RecordsClient | null;
-  // 수정·삭제 요청도 계정 확인 후 보내고, 늦게 온 응답은 계정·화면이 그대로일 때만 반영한다
+  // 수정·삭제 요청도 계정 확인 후 그 계정의 인증으로 고정해 보내고, 늦게 온 응답은 계정·화면이 그대로일 때만 반영한다
   const run = useScopedRequest();
 
   function startEdit() {
@@ -48,11 +47,12 @@ export default function RecordItem({
   }
 
   async function save(expectedVersion: number) {
-    const c = client();
-    if (!c) return;
+    if (!getBrowserClient()) return;
     setBusy(true);
     setFail(null);
-    const r = await run(() => updateCheckin(c, { id: record.id, expectedVersion, ...edit }));
+    const r = await run((client) =>
+      updateCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion, ...edit }),
+    );
     if (!r.ok) return;
     const res = r.value;
     setBusy(false);
@@ -75,11 +75,12 @@ export default function RecordItem({
   }
 
   async function remove() {
-    const c = client();
-    if (!c) return;
+    if (!getBrowserClient()) return;
     setBusy(true);
     setFail(null);
-    const r = await run(() => deleteCheckin(c, { id: record.id, expectedVersion: record.version }));
+    const r = await run((client) =>
+      deleteCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion: record.version }),
+    );
     if (!r.ok) return;
     const res = r.value;
     setBusy(false);

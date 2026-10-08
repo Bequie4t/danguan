@@ -4,14 +4,15 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import type { Checkin } from "@/lib/checkins/model";
-import { FAIL_TEXT, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
 import { ownedBy } from "@/lib/session/guard";
-import { useScopedRequest } from "./AuthScope";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
 import RecordItem from "./RecordItem";
 
 // 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌거나 로그아웃하면 AuthScope가
 // 이 화면을 새로 만들거나 로그인 화면으로 보내므로, 이전 계정의 목록이 남지 않는다.
 export default function RecordList() {
+  const { uid } = useAuthScope();
   const run = useScopedRequest();
   const [records, setRecords] = useState<Checkin[] | null>(null);
   const [error, setError] = useState<FailReason | null>(null);
@@ -20,15 +21,15 @@ export default function RecordList() {
   const latest = useRef(0);
 
   const load = useCallback(async () => {
-    const supabase = getBrowserClient();
-    if (!supabase) {
+    if (!getBrowserClient()) {
       setError("unknown");
       setLoading(false);
       return;
     }
     const mine = ++latest.current;
     setLoading(true);
-    const r = await run(() => listCheckins(supabase as unknown as RecordsClient));
+    // 이 계정의 인증으로 고정해 조회한다
+    const r = await run((client) => listCheckins(client as unknown as RecordsClient));
     // 화면이 닫혔거나 계정이 바뀌었거나 더 새로운 조회가 있으면 반영하지 않는다
     if (!r.ok || mine !== latest.current) return;
     const res = r.value;
@@ -47,6 +48,7 @@ export default function RecordList() {
   }, [load]);
 
   function replace(rec: Checkin) {
+    if (rec.owner_id !== uid) return;
     setRecords((rs) => (rs ? rs.map((r) => (r.id === rec.id ? rec : r)) : rs));
   }
   function remove(id: string) {
@@ -72,7 +74,7 @@ export default function RecordList() {
 
       {error && (
         <p role="alert" className="rounded-xl bg-warn-soft p-3 text-warn">
-          {error === "signed_out" ? FAIL_TEXT.signed_out : "기록을 불러오지 못했어요. 연결을 확인하고 ‘다시 불러오기’를 눌러 주세요."}
+          {error === "signed_out" ? "로그인이 끝났어요. 다시 로그인해 주세요." : "기록을 불러오지 못했어요. 연결을 확인하고 ‘다시 불러오기’를 눌러 주세요."}
         </p>
       )}
 

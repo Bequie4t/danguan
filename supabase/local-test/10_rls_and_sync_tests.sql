@@ -89,12 +89,34 @@ select t.ok((select note = '기기 1에서 수정' and burden = 'bearable' and v
              from public.checkins where id = '11111111-0000-4000-8000-000000000001'),
   '충돌 후에도 서버 기록은 그대로');
 
--- 9. 직접 UPDATE로도 소유자·입력 시점은 못 바꾸고 version은 올라간다
-update public.checkins set owner_id = 'bbbbbbbb-0000-4000-8000-000000000002', recorded_at = now() - interval '9 days'
- where id = '11111111-0000-4000-8000-000000000002';
-select t.ok((select owner_id = 'aaaaaaaa-0000-4000-8000-000000000001' and version = 2 and recorded_at > now() - interval '1 day'
-             from public.checkins where id = '11111111-0000-4000-8000-000000000002'),
-  '소유자·입력 시점 변경 차단, version 증가');
+-- 9. 같은 사용자라도 표에 직접 쓰기는 막힌다 (버전 확인을 건너뛸 수 없음, 20261008 마이그레이션)
+select t.fails($q$ update public.checkins set note = 'A 직접 수정', burden = 'okay' where id = '11111111-0000-4000-8000-000000000001' $q$,
+  'A의 자기 기록 직접 UPDATE 거부 (버전 확인 우회 불가)');
+select t.fails($q$ delete from public.checkins where id = '11111111-0000-4000-8000-000000000001' $q$,
+  'A의 자기 기록 직접 DELETE 거부 (버전 확인 우회 불가)');
+select t.fails($q$ insert into public.checkins (id, occurred_at, occurred_tz, recorded_at, recorded_tz, source, burden)
+  values (gen_random_uuid(), now(), 'Asia/Seoul', now(), 'Asia/Seoul', 'direct', 'heavy') $q$,
+  'A의 직접 INSERT 거부 (저장 함수로만 생성)');
+select t.ok((select note = '기기 1에서 수정' and version = 2 from public.checkins where id = '11111111-0000-4000-8000-000000000001'),
+  '직접 쓰기 시도 후에도 기록·버전 그대로');
+
+-- 9-1. 저장 성공 → 응답 유실 → 입력 변경 → 재시도
+--   클라이언트는 같은 ID에 원래 내용을 다시 보내 저장 여부를 확인하고, 바뀐 입력은 버전 검사를 거쳐 수정한다.
+select public.create_checkin('11111111-0000-4000-8000-000000000009', now(), 'Asia/Seoul', now(), 'Asia/Seoul', 'direct', 'heavy', '{}', '원래 메모');
+--   (응답 유실) 사용자가 메모를 바꾼 뒤 재시도: 먼저 원래 내용으로 재확인 → 이미 있음
+select t.ok((select (r ->> 'created')::boolean = false and (r -> 'record' ->> 'note') = '원래 메모' and (r -> 'record' ->> 'version')::int = 1
+             from (select public.create_checkin('11111111-0000-4000-8000-000000000009', now(), 'Asia/Seoul', now(), 'Asia/Seoul', 'direct', 'heavy', '{}', '원래 메모') as r) s),
+  '재확인: 이미 저장된 원래 기록(version 1)을 돌려줌');
+--   바뀐 입력을 같은 ID로 다시 생성하려 해도 서버는 덮어쓰지 않는다 (클라이언트가 이 응답만 믿으면 안 되는 이유)
+select t.ok((select (r -> 'record' ->> 'note') = '원래 메모'
+             from (select public.create_checkin('11111111-0000-4000-8000-000000000009', now(), 'Asia/Seoul', now(), 'Asia/Seoul', 'direct', 'okay', '{}', '바뀐 메모') as r) s),
+  '같은 ID로 다른 내용 생성 요청은 원래 기록을 돌려줌 (내용이 바뀌지 않음)');
+--   그래서 바뀐 입력은 확인한 version으로 수정한다
+select t.ok((select (r ->> 'status') = 'ok' and (r -> 'record' ->> 'note') = '바뀐 메모' and (r -> 'record' ->> 'burden') = 'okay' and (r -> 'record' ->> 'version')::int = 2
+             from (select public.update_checkin('11111111-0000-4000-8000-000000000009', 1, 'okay', '{}', '바뀐 메모') as r) s),
+  '바뀐 입력은 version 1 확인 후 수정되어 version 2');
+select t.ok((select count(*) from public.checkins where id = '11111111-0000-4000-8000-000000000009') = 1, '재시도 흐름 후에도 기록 1개');
+select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000009', 2) ->> 'status') = 'ok', '재시도 시험 기록 정리');
 
 -- 10. 삭제: 옛 version이면 충돌
 select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000001', 1) ->> 'status') = 'conflict', '옛 version 삭제는 conflict');
@@ -122,10 +144,8 @@ select t.fails($q$ insert into public.checkins (id, owner_id, occurred_at, occur
 select t.ok((public.update_checkin('11111111-0000-4000-8000-000000000003', 1, 'heavy', '{}', 'B의 수정') ->> 'status') = 'not_found', 'B의 A 기록 수정 → not_found');
 select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000003', 1) ->> 'status') = 'not_found', 'B의 A 기록 삭제 → not_found');
 
-with u as (update public.checkins set note = 'B 직접 수정' where id = '11111111-0000-4000-8000-000000000003' returning 1)
-select t.ok((select count(*) from u) = 0, 'B의 직접 UPDATE 영향 0행');
-with d as (delete from public.checkins where id = '11111111-0000-4000-8000-000000000003' returning 1)
-select t.ok((select count(*) from d) = 0, 'B의 직접 DELETE 영향 0행');
+select t.fails($q$ update public.checkins set note = 'B 직접 수정' where id = '11111111-0000-4000-8000-000000000003' $q$, 'B의 직접 UPDATE 거부');
+select t.fails($q$ delete from public.checkins where id = '11111111-0000-4000-8000-000000000003' $q$, 'B의 직접 DELETE 거부');
 
 -- ======================================================================
 -- 로그아웃 상태(anon)
@@ -153,7 +173,16 @@ select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000003', 1) ->
 update public.consents set withdrawn_at = now();
 select t.fails($q$ select public.create_checkin(gen_random_uuid(), now(), 'Asia/Seoul', now(), 'Asia/Seoul', 'direct', 'heavy') $q$, '동의 철회 후 새 기록 거부');
 select t.ok((select count(*) from public.checkins) = 2, '동의 철회 후에도 내 기록 조회 가능');
-select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000002', 2) ->> 'status') = 'ok', '동의 철회 후에도 내 기록 삭제 가능');
+select t.ok((public.delete_checkin('11111111-0000-4000-8000-000000000002', 1) ->> 'status') = 'ok', '동의 철회 후에도 내 기록 삭제 가능');
 
+-- 권한 구조 확인
 reset role;
+select t.ok(not has_table_privilege('authenticated', 'public.checkins', 'INSERT')
+        and not has_table_privilege('authenticated', 'public.checkins', 'UPDATE')
+        and not has_table_privilege('authenticated', 'public.checkins', 'DELETE')
+        and has_table_privilege('authenticated', 'public.checkins', 'SELECT'), 'authenticated는 checkins 조회만 가능');
+select t.ok((select bool_and(p.prosecdef and pg_get_userbyid(p.proowner) = 'danguan_record_writer')
+             from pg_proc p where p.proname in ('create_checkin','update_checkin','delete_checkin') and p.pronamespace = 'public'::regnamespace),
+  '저장 함수 3개는 전용 역할 권한으로 실행');
+select t.ok((select not rolcanlogin from pg_roles where rolname = 'danguan_record_writer'), '전용 역할은 로그인 불가');
 select 'ALL DATABASE TESTS PASSED' as result;
