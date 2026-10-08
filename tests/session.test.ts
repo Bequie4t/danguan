@@ -129,11 +129,15 @@ test("[회귀] 확인 중 로그아웃 → 늦게 온 A 확인 결과가 로그�
   const g = createSessionGuard(null);
   g.setUser("user-a");
   const late = deferred<SessionAuth | null>();
-  const p = guardedRequest({ guard: g, getSessionAuth: () => late.promise, isMounted: () => true, send: async () => 1 });
+  let sent = false;
+  const p = guardedRequest({ guard: g, getSessionAuth: () => late.promise, isMounted: () => true, send: async () => { sent = true; return 1; } });
   g.setUser(null);
+  const genOut = g.generation;
   late.resolve(authOf("user-a"));
   assert.equal((await p).ok, false);
-  assert.equal(g.uid, null);
+  assert.equal(g.uid, null, "로그아웃 상태 그대로");
+  assert.equal(g.generation, genOut, "세대도 그대로");
+  assert.equal(sent, false, "로그아웃 뒤에는 늦게 온 A 확인 결과로 요청을 보내지 않음");
 });
 
 test("[회귀] AuthScope 처음 세션 조회: 결과가 오기 전에 B 로그인 이벤트가 먼저 반영되면 늦은 A 결과는 버린다", () => {
