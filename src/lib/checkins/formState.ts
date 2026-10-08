@@ -2,6 +2,7 @@
 // 규칙
 //  - 서버가 저장된 기록을 돌려주기 전에는 "saved"가 되지 않는다.
 //  - 실패하면 입력과 기록 ID를 그대로 둔다 → 다시 저장해도 중복 생성되지 않는다.
+//  - 실패 뒤 사용자가 바꾼 입력도 그대로 둔다. 서버 확인·수정 순서는 saveFlow.ts가 맡는다.
 //  - 성공하면 다음 기록을 위해 새 ID로 비운다.
 import type { Burden, Checkin, Draft, DraftProblem, TagCode } from "./model";
 import type { FailReason } from "./api";
@@ -25,6 +26,8 @@ export type FormAction =
   | { type: "submitStart" }
   | { type: "submitSuccess"; record: Checkin; nextId: string }
   | { type: "submitFail"; reason: FailReason }
+  | { type: "submitConflict" }
+  | { type: "newId"; id: string }
   | { type: "replaceDraft"; draft: Draft };
 
 export function initialFormState(draft: Draft): FormState {
@@ -72,6 +75,13 @@ export function formReducer(state: FormState, action: FormAction): FormState {
       };
     case "submitFail":
       return { ...state, status: "failed", failReason: action.reason };
+    case "submitConflict":
+      // 확인해 보니 다른 기기에서 먼저 바뀜. 입력은 그대로 두고 사용자가 다시 저장할지 고른다.
+      return { ...state, status: "failed", failReason: null };
+    case "newId":
+      // 저장된 적 없는 기록에만 쓴다 (id_unavailable). 입력 내용은 유지.
+      if (state.status === "saving") return state;
+      return { ...state, draft: { ...state.draft, id: action.id } };
     case "replaceDraft":
       return initialFormState(action.draft);
     default:

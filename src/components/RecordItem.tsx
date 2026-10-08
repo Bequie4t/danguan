@@ -4,6 +4,7 @@ import { useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import { BURDEN_OPTIONS, NOTE_MAX, TAG_OPTIONS, type Burden, type Checkin, type TagCode } from "@/lib/checkins/model";
 import { FAIL_TEXT, deleteCheckin, updateCheckin, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { useAuthScope } from "./AuthScope";
 import RecordSummary from "./RecordSummary";
 
 type Mode =
@@ -34,6 +35,7 @@ export default function RecordItem({
   const [fail, setFail] = useState<FailReason | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const { guard } = useAuthScope();
   const client = () => getBrowserClient() as unknown as RecordsClient | null;
 
   function startEdit() {
@@ -48,7 +50,9 @@ export default function RecordItem({
     if (!c) return;
     setBusy(true);
     setFail(null);
+    const t = guard.ticket();
     const res = await updateCheckin(c, { id: record.id, expectedVersion, ...edit });
+    if (!guard.isCurrent(t)) return; // 계정이 바뀐 뒤 도착한 응답은 버린다
     setBusy(false);
     if (res.kind === "saved") {
       onReplace(res.record);
@@ -69,7 +73,9 @@ export default function RecordItem({
     if (!c) return;
     setBusy(true);
     setFail(null);
+    const t = guard.ticket();
     const res = await deleteCheckin(c, { id: record.id, expectedVersion: record.version });
+    if (!guard.isCurrent(t)) return;
     setBusy(false);
     if (res.kind === "deleted" || res.kind === "not_found") {
       onRemove(record.id);

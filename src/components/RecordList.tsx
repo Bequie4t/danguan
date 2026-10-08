@@ -4,10 +4,14 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import type { Checkin } from "@/lib/checkins/model";
-import { FAIL_TEXT, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { ownedBy } from "@/lib/session/guard";
+import { useAuthScope } from "./AuthScope";
 import RecordItem from "./RecordItem";
 
 export default function RecordList() {
+  // 계정이 바뀌면 AuthScope가 이 화면을 새로 만든다. 그 전에 출발한 요청의 응답은 guard로 버린다.
+  const { guard } = useAuthScope();
   const [records, setRecords] = useState<Checkin[] | null>(null);
   const [error, setError] = useState<FailReason | null>(null);
   const [loading, setLoading] = useState(true);
@@ -20,35 +24,24 @@ export default function RecordList() {
       return;
     }
     setLoading(true);
+    const t = guard.ticket();
     const res = await listCheckins(supabase as unknown as RecordsClient);
+    if (!guard.isCurrent(t)) return; // 지연된 이전 사용자 응답
     if (res.kind === "ok") {
-      setRecords(res.records);
+      setRecords(res.records.filter((r) => ownedBy(r, t)));
       setError(null);
     } else {
       setError(res.reason);
     }
     setLoading(false);
-  }, []);
+  }, [guard]);
 
   useEffect(() => {
     void load();
-    const supabase = getBrowserClient();
-    if (!supabase) return;
-    // 다른 탭에서 로그아웃하거나 계정이 바뀌면 화면의 기록을 즉시 비운다.
-    let lastUser: string | null | undefined;
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      const uid = session?.user?.id ?? null;
-      if (lastUser !== undefined && uid !== lastUser) {
-        setRecords(null);
-        if (uid) void load();
-        else window.location.replace("/login?signedOut=1");
-      }
-      lastUser = uid;
-    });
-    return () => sub.subscription.unsubscribe();
   }, [load]);
 
   function replace(rec: Checkin) {
+    if (!ownedBy(rec, guard.ticket())) return;
     setRecords((rs) => (rs ? rs.map((r) => (r.id === rec.id ? rec : r)) : rs));
   }
   function remove(id: string) {
@@ -74,7 +67,7 @@ export default function RecordList() {
 
       {error && (
         <p role="alert" className="rounded-xl bg-warn-soft p-3 text-warn">
-          {error === "signed_out" ? FAIL_TEXT.signed_out : "기록을 불러오지 못했어요. 연결을 확인하고 ‘다시 불러오기’를 눌러 주세요."}
+          {error === "signed_out" ? "로그인이 끝났어요. 다시 로그인해 주세요." : "기록을 불러오지 못했어요. 연결을 확인하고 ‘다시 불러오기’를 눌러 주세요."}
         </p>
       )}
 
