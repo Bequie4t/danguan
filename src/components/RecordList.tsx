@@ -12,7 +12,7 @@ import RecordItem from "./RecordItem";
 // 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌거나 로그아웃하면 AuthScope가
 // 이 화면을 새로 만들거나 로그인 화면으로 보내므로, 이전 계정의 목록이 남지 않는다.
 export default function RecordList() {
-  const { uid } = useAuthScope();
+  const { uid, guard } = useAuthScope();
   const run = useScopedRequest();
   const [records, setRecords] = useState<Checkin[] | null>(null);
   const [error, setError] = useState<FailReason | null>(null);
@@ -31,7 +31,12 @@ export default function RecordList() {
     // 이 계정의 인증으로 고정해 조회한다
     const r = await run((client) => listCheckins(client as unknown as RecordsClient));
     // 화면이 닫혔거나 계정이 바뀌었거나 더 새로운 조회가 있으면 반영하지 않는다
-    if (!r.ok || mine !== latest.current) return;
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket) || mine !== latest.current) return;
+    if (!r.ok) {
+      setError("unknown");
+      setLoading(false);
+      return;
+    }
     const res = r.value;
     if (res.kind === "ok") {
       // 서버 RLS가 막지만, 요청한 계정의 기록만 화면에 둔다 (한 번 더 확인)
@@ -41,7 +46,7 @@ export default function RecordList() {
       setError(res.reason);
     }
     setLoading(false);
-  }, [run]);
+  }, [run, guard]);
 
   useEffect(() => {
     void load();

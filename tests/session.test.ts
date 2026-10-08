@@ -83,6 +83,7 @@ function screen(uid: string | null) {
   const run = <T,>(send: (auth: SessionAuth) => Promise<T>) =>
     guardedRequest({
       guard,
+      ticket: guard.ticket(),
       getSessionAuth: async () => {
         const seen = s.session; // 확인을 시작한 순간의 세션
         if (s.sessionDelay) await s.sessionDelay;
@@ -114,7 +115,7 @@ test("[회귀] A 계정 확인 중 B로 전환 → 늦게 온 A 확인 결과가
   g.setUser("user-a");
   const late = deferred<SessionAuth | null>();
   let sent = false;
-  const p = guardedRequest({ guard: g, getSessionAuth: () => late.promise, isMounted: () => true, send: async () => { sent = true; return 1; } });
+  const p = guardedRequest({ guard: g, ticket: g.ticket(), getSessionAuth: () => late.promise, isMounted: () => true, send: async () => { sent = true; return 1; } });
   g.setUser("user-b"); // B로 전환 (인증 이벤트)
   const genB = g.generation;
   late.resolve(authOf("user-a")); // 늦게 도착한 A 확인 결과
@@ -130,7 +131,7 @@ test("[회귀] 확인 중 로그아웃 → 늦게 온 A 확인 결과가 로그�
   g.setUser("user-a");
   const late = deferred<SessionAuth | null>();
   let sent = false;
-  const p = guardedRequest({ guard: g, getSessionAuth: () => late.promise, isMounted: () => true, send: async () => { sent = true; return 1; } });
+  const p = guardedRequest({ guard: g, ticket: g.ticket(), getSessionAuth: () => late.promise, isMounted: () => true, send: async () => { sent = true; return 1; } });
   g.setUser(null);
   const genOut = g.generation;
   late.resolve(authOf("user-a"));
@@ -220,7 +221,7 @@ test("토큰의 사용자(sub)가 화면 계정과 다르면 보내지 않는다
   g.setUser("user-a");
   let sent = false;
   const r = await guardedRequest({
-    guard: g,
+    guard: g, ticket: g.ticket(),
     getSessionAuth: async () => ({ uid: "user-a", accessToken: fakeToken("user-b") }),
     isMounted: () => true,
     send: async () => { sent = true; return 1; },
@@ -303,7 +304,7 @@ test("A의 저장 실패 뒤 B로 바뀌면: B 화면은 빈 입력·새 ID, A�
   staleGuard.setUser("user-a");
   const before = server.sent.length;
   const stale = await guardedRequest({
-    guard: staleGuard,
+    guard: staleGuard, ticket: staleGuard.ticket(),
     getSessionAuth: async () => authOf(sc.state.session),
     isMounted: () => true,
     send: (auth) => saveDraft(server.clientFor(auth.accessToken), formA.draft, pendingA, NOW, "Asia/Seoul"),
@@ -430,4 +431,116 @@ test("서버에 저장된 기록은 계정 전환으로 지워지지 않는다",
   sc.switchTo(null);
   assert.equal(server.rows.has(id), true);
   assert.equal(server.sent.filter((s) => s.fn === "delete_checkin").length, 0);
+});
+
+test("[회귀] 공유 guard가 B로 바뀐 직후에도 A 화면의 남은 콜백은 조회·동의·쓰기 요청을 보내지 않는다", async () => {
+  const guard = createSessionGuard("user-a");
+  const ticket = guard.ticket(); // A 화면 렌더 때 고정; 화면 정리는 아직 안 됨
+  let sessionReads = 0;
+  let sends = 0;
+  const staleRun = () => guardedRequest({
+    guard, ticket, isMounted: () => true,
+    getSessionAuth: async () => { sessionReads++; return authOf("user-b"); },
+    send: async () => { sends++; return "A의 가상 입력"; },
+  });
+  guard.setUser("user-b");
+  for (const _operation of ["조회", "동의", "생성", "재시도", "수정", "삭제"]) {
+    assert.deepEqual(await staleRun(), { ok: false, reason: "account_changed" });
+  }
+  assert.equal(sessionReads, 0);
+  assert.equal(sends, 0);
+  assert.equal(guard.uid, "user-b");
+  const current = await guardedRequest({
+    guard, ticket: guard.ticket(), isMounted: () => true,
+    getSessionAuth: async () => authOf("user-b"), send: async () => 1,
+  });
+  assert.equal(current.ok, true);
+});
+
+test("[회귀] A→로그아웃→A 후에는 같은 계정이라도 옛 화면의 콜백을 보내지 않는다", async () => {
+  const guard = createSessionGuard("user-a");
+  const ticket = guard.ticket();
+  guard.setUser(null);
+  guard.setUser("user-a");
+  let sent = false;
+  const r = await guardedRequest({
+    guard, ticket, isMounted: () => true, getSessionAuth: async () => authOf("user-a"),
+    send: async () => { sent = true; return 1; },
+  });
+  assert.deepEqual(r, { ok: false, reason: "account_changed" });
+  assert.equal(sent, false);
+});
+
+test("세션 조회 실패는 로그아웃으로 바꾸지 않고 같은 계정의 입력·ID·재시도 요청을 유지한다", async () => {
+  const guard = createSessionGuard("user-a");
+  const ticket = guard.ticket();
+  const original = initialFormState({ ...newDraft(fakeId), burden: "heavy" as const, note: "가상 입력" });
+  let form = formReducer(original, { type: "submitStart" });
+  let sent = false;
+  const r = await guardedRequest({
+    guard, ticket, isMounted: () => true,
+    getSessionAuth: async () => { throw new Error("fake offline"); },
+    send: async () => { sent = true; return 1; },
+  });
+  assert.deepEqual(r, { ok: false, reason: "session_error", ticket });
+  if (!r.ok && "ticket" in r && guard.isCurrent(r.ticket)) form = formReducer(form, { type: "submitFail", reason: "unknown" });
+  assert.equal(form.status, "failed");
+  assert.deepEqual(form.draft, original.draft);
+  assert.equal(guard.uid, "user-a");
+  assert.equal(guard.generation, ticket.generation);
+  assert.equal(sent, false);
+  const server = fakeServer();
+  const retry = await guardedRequest({
+    guard, ticket, isMounted: () => true, getSessionAuth: async () => authOf("user-a"),
+    send: (auth) => saveDraft(server.clientFor(auth.accessToken), form.draft, null, NOW, "Asia/Seoul"),
+  });
+  assert.ok(retry.ok && retry.value.kind === "saved");
+  assert.equal(server.rows.get(original.draft.id)?.owner_id, "user-a");
+});
+
+test("세션 확인 중 계정이 바뀐 후의 예외는 새 화면에 실패를 반영하지 않는다", async () => {
+  const guard = createSessionGuard("user-a");
+  const ticket = guard.ticket();
+  const r = await guardedRequest({
+    guard, ticket, isMounted: () => true,
+    getSessionAuth: async () => { guard.setUser("user-b"); throw new Error("fake offline"); },
+    send: async () => 1,
+  });
+  assert.deepEqual(r, { ok: false, reason: "account_changed" });
+  assert.equal(guard.uid, "user-b");
+});
+
+test("같은 계정의 토큰 불일치·요청 예외는 복구 가능한 실패로 반환하고 계정 전환 뒤에는 버린다", async () => {
+  const guard = createSessionGuard("user-a");
+  const ticket = guard.ticket();
+  const invalid = await guardedRequest({
+    guard, ticket, isMounted: () => true,
+    getSessionAuth: async () => ({ uid: "user-a", accessToken: fakeToken("user-b") }),
+    send: async () => { assert.fail("인증 불일치는 보내면 안 됨"); },
+  });
+  assert.deepEqual(invalid, { ok: false, reason: "invalid_session", ticket });
+  const failed = await guardedRequest({
+    guard, ticket, isMounted: () => true, getSessionAuth: async () => authOf("user-a"),
+    send: async () => { throw new Error("fake request failure"); },
+  });
+  assert.deepEqual(failed, { ok: false, reason: "request_error", ticket });
+  guard.setUser("user-b");
+  assert.equal(guard.isCurrent(ticket), false, "화면에서 결과를 반영하기 직전에도 확인");
+});
+
+test("요청이 실패하는 동안 계정 전환·화면 정리가 일어나면 복구 응답도 버린다", async () => {
+  for (const close of [false, true]) {
+    const guard = createSessionGuard("user-a");
+    let mounted = true;
+    const r = await guardedRequest({
+      guard, ticket: guard.ticket(), isMounted: () => mounted,
+      getSessionAuth: async () => authOf("user-a"),
+      send: async () => {
+        if (close) mounted = false;
+        else guard.setUser("user-b");
+        throw new Error("fake late failure");
+      },
+    });
+    assert.deepEqual(r, { ok: false, reason: close ? "closed" : "account_changed" });
+  }
 });

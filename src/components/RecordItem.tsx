@@ -5,7 +5,7 @@ import { getBrowserClient } from "@/lib/supabase/client";
 import { BURDEN_OPTIONS, NOTE_MAX, TAG_OPTIONS, type Burden, type Checkin, type TagCode } from "@/lib/checkins/model";
 import { FAIL_TEXT, deleteCheckin, updateCheckin, type FailReason, type RecordsClient } from "@/lib/checkins/api";
 import { ownedBy } from "@/lib/session/guard";
-import { useScopedRequest } from "./AuthScope";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
 import RecordSummary from "./RecordSummary";
 
 type Mode =
@@ -38,6 +38,7 @@ export default function RecordItem({
 
   // 수정·삭제 요청도 계정 확인 후 그 계정의 인증으로 고정해 보내고, 늦게 온 응답은 계정·화면이 그대로일 때만 반영한다
   const run = useScopedRequest();
+  const { guard } = useAuthScope();
 
   function startEdit() {
     setEdit({ burden: record.burden, tags: record.tags, note: record.note ?? "" });
@@ -53,7 +54,12 @@ export default function RecordItem({
     const r = await run((client) =>
       updateCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion, ...edit }),
     );
-    if (!r.ok) return;
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setBusy(false);
+      setFail("unknown");
+      return;
+    }
     const res = r.value;
     setBusy(false);
     if ((res.kind === "saved" && !ownedBy(res.record, r.ticket)) || (res.kind === "conflict" && !ownedBy(res.server, r.ticket))) {
@@ -81,7 +87,12 @@ export default function RecordItem({
     const r = await run((client) =>
       deleteCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion: record.version }),
     );
-    if (!r.ok) return;
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setBusy(false);
+      setFail("unknown");
+      return;
+    }
     const res = r.value;
     setBusy(false);
     if (res.kind === "conflict" && !ownedBy(res.server, r.ticket)) {

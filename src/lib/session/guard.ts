@@ -112,11 +112,12 @@ export function tokenSubject(accessToken: string): string | null {
 
 export type Guarded<T> =
   | { ok: true; value: T; ticket: Ticket }
+  | { ok: false; reason: "session_error" | "invalid_session" | "request_error"; ticket: Ticket }
   | { ok: false; reason: "account_changed" | "signed_out" | "closed" };
 
 /**
  * 계정 확인 → 인증 고정 → 요청 → 응답 확인을 한 번에 한다.
- *  1) 표를 받는다. 화면이 닫혔거나 표가 이미 무효면 보내지 않는다.
+ *  1) 호출한 화면에 고정된 표를 확인한다. 화면이 닫혔거나 표가 이미 무효면 보내지 않는다.
  *  2) 실제 세션(사용자 + 액세스 토큰)을 확인한다.
  *     - 확인하는 사이 표가 무효가 됐으면(다른 계정으로 바뀜) 즉시 끝낸다. 이 늦은 확인 결과로 보호 상태를 바꾸지 않는다.
  *     - 세션 사용자가 화면의 사용자와 다르면 보내지 않는다. 확인을 시작한 세대가 그대로일 때만 화면에 변경을 알린다.
@@ -127,12 +128,13 @@ export type Guarded<T> =
  */
 export async function guardedRequest<T>(opts: {
   guard: SessionGuard;
+  /** 호출한 화면의 계정·세대. 요청 순간의 guard에서 새로 받지 않는다. */
+  ticket: Ticket;
   getSessionAuth: () => Promise<SessionAuth | null>;
   isMounted: () => boolean;
   send: (auth: SessionAuth) => Promise<T>;
 }): Promise<Guarded<T>> {
-  const { guard, getSessionAuth, isMounted, send } = opts;
-  const t = guard.ticket();
+  const { guard, ticket: t, getSessionAuth, isMounted, send } = opts;
   if (!isMounted()) return { ok: false, reason: "closed" };
   if (!guard.isCurrent(t)) return { ok: false, reason: t.uid === null ? "signed_out" : "account_changed" };
 
@@ -140,7 +142,9 @@ export async function guardedRequest<T>(opts: {
   try {
     auth = await getSessionAuth();
   } catch {
-    auth = null;
+    if (!isMounted()) return { ok: false, reason: "closed" };
+    if (!guard.isCurrent(t)) return { ok: false, reason: guard.uid === null ? "signed_out" : "account_changed" };
+    return { ok: false, reason: "session_error", ticket: t };
   }
   if (!isMounted()) return { ok: false, reason: "closed" };
   // 확인하는 사이 계정이 바뀌었다: 이 확인 결과는 이미 낡았으므로 보호 상태를 건드리지 않고 끝낸다.
@@ -153,10 +157,17 @@ export async function guardedRequest<T>(opts: {
     return { ok: false, reason: sessionUid === null ? "signed_out" : "account_changed" };
   }
   if (!auth || tokenSubject(auth.accessToken) !== t.uid) {
-    return { ok: false, reason: "account_changed" };
+    return { ok: false, reason: "invalid_session", ticket: t };
   }
 
-  const value = await send(auth);
+  let value: T;
+  try {
+    value = await send(auth);
+  } catch {
+    if (!isMounted()) return { ok: false, reason: "closed" };
+    if (!guard.isCurrent(t)) return { ok: false, reason: guard.uid === null ? "signed_out" : "account_changed" };
+    return { ok: false, reason: "request_error", ticket: t };
+  }
   if (!isMounted()) return { ok: false, reason: "closed" };
   if (!guard.isCurrent(t)) return { ok: false, reason: guard.uid === null ? "signed_out" : "account_changed" };
   return { ok: true, value, ticket: t };

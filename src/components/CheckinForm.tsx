@@ -30,7 +30,7 @@ const makeId = () => crypto.randomUUID();
 // 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌면 AuthScope가 이 화면을 새로 만들어
 // 입력·동의 상태·재시도 요청·저장 결과가 모두 비워진다.
 export default function CheckinForm() {
-  const { uid } = useAuthScope();
+  const { uid, guard } = useAuthScope();
   const run = useScopedRequest();
   const [consent, setConsent] = useState<ConsentState | "loading">("loading");
   const [state, dispatch] = useReducer(formReducer, undefined, () => initialFormState(newDraft(makeId)));
@@ -54,9 +54,9 @@ export default function CheckinForm() {
     }
     // 이전 계정에서 시작한 동의 확인 결과는 반영하지 않는다. 확인도 이 계정의 인증으로 고정해 보낸다.
     void run((client) => getStorageConsent(client)).then((r) => {
-      if (r.ok) setConsent(r.value);
+      if ("ticket" in r && guard.isCurrent(r.ticket)) setConsent(r.ok ? r.value : "error");
     });
-  }, [run]);
+  }, [run, guard]);
 
   // 저장 중이거나 저장에 실패한 입력이 있으면 창을 닫기 전에 묻는다.
   useEffect(() => {
@@ -82,9 +82,17 @@ export default function CheckinForm() {
     const r = await run((client) =>
       saveDraft(client as unknown as RecordsClient, draft, prev, new Date(), currentTimeZone()),
     );
-    if (!r.ok) return;
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      dispatch({ type: "submitFail", reason: "unknown" });
+      return;
+    }
     const res = r.value;
     const t = r.ticket;
+    if (res.kind === "conflict" && !ownedBy(res.server, t)) {
+      dispatch({ type: "submitFail", reason: "unknown" });
+      return;
+    }
 
     if (res.kind === "saved") {
       if (!ownedBy(res.record, t)) {
