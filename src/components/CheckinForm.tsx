@@ -276,8 +276,8 @@ export default function CheckinForm() {
             <p>{FAIL_TEXT[state.failReason]}</p>
             <div className="flex flex-wrap gap-2">
               {state.failReason === "signed_out" ? (
-                <a href="/login" target="_blank" rel="noopener" className="rounded-lg border border-current px-4 py-2 font-semibold">
-                  새 탭에서 로그인하기
+                <a href="/login" className="rounded-lg border border-current px-4 py-2 font-semibold">
+                  로그인 화면으로 가기 (입력은 사라져요)
                 </a>
               ) : state.failReason === "no_consent" ? (
                 <Link href="/consent?next=/today" className="rounded-lg border border-current px-4 py-2 font-semibold">
