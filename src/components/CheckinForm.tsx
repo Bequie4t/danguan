@@ -21,15 +21,22 @@ import {
 } from "@/lib/checkins/model";
 import { createCheckin, FAIL_TEXT, type RecordsClient } from "@/lib/checkins/api";
 import { formReducer, initialFormState } from "@/lib/checkins/formState";
+import { ownedBy } from "@/lib/session/guard";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
 
 const makeId = () => crypto.randomUUID();
 
+// 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌면 AuthScope가 이 화면을 새로 만들어
+// 입력·동의 상태·재시도 요청·저장 결과가 모두 비워진다.
 export default function CheckinForm() {
+  const { uid } = useAuthScope();
+  const run = useScopedRequest();
   const [consent, setConsent] = useState<ConsentState | "loading">("loading");
   const [state, dispatch] = useReducer(formReducer, undefined, () => initialFormState(newDraft(makeId)));
   const [expanded, setExpanded] = useState(false);
   // 처음 보낸 요청을 기억했다가, 입력이 그대로면 재시도 때 같은 값을 다시 보낸다.
-  const pending = useRef<{ draft: Draft; params: CreateCheckinParams } | null>(null);
+  // 어느 계정의 요청인지 함께 기억해 다른 계정으로 다시 보내지 않는다.
+  const pending = useRef<{ uid: string; draft: Draft; params: CreateCheckinParams } | null>(null);
 
   useEffect(() => {
     const supabase = getBrowserClient();
@@ -37,8 +44,11 @@ export default function CheckinForm() {
       setConsent("error");
       return;
     }
-    getStorageConsent(supabase).then(setConsent);
-  }, []);
+    // 이전 계정에서 시작한 동의 확인 결과는 반영하지 않는다
+    void run(() => getStorageConsent(supabase)).then((r) => {
+      if (r.ok) setConsent(r.value);
+    });
+  }, [run]);
 
   // 저장 중이거나 저장에 실패한 입력이 있으면 창을 닫기 전에 묻는다.
   useEffect(() => {
@@ -56,6 +66,9 @@ export default function CheckinForm() {
     const supabase = getBrowserClient();
     if (!supabase || state.status === "saving") return;
 
+    // 다른 계정에서 만든 재시도 요청은 버린다 (AuthScope가 화면을 새로 만들지만 한 번 더 확인)
+    if (pending.current && pending.current.uid !== uid) pending.current = null;
+
     let params: CreateCheckinParams;
     if (pending.current && pending.current.draft === draft) {
       params = pending.current.params;
@@ -66,11 +79,19 @@ export default function CheckinForm() {
         return;
       }
       params = built.params;
-      pending.current = { draft, params };
+      pending.current = { uid, draft, params };
     }
 
     dispatch({ type: "submitStart" });
-    const res = await createCheckin(supabase as unknown as RecordsClient, params);
+    // 보내기 전에 실제 로그인 계정이 이 화면의 계정인지 확인하고, 응답이 늦게 와서
+    // 그사이 계정이 바뀌었거나 화면이 닫혔으면 아무것도 반영하지 않는다.
+    const r = await run(() => createCheckin(supabase as unknown as RecordsClient, params));
+    if (!r.ok) return;
+    const res = r.value;
+    if (res.kind === "saved" && !ownedBy(res.record, r.ticket)) {
+      dispatch({ type: "submitFail", reason: "unknown" });
+      return;
+    }
     if (res.kind === "saved") {
       pending.current = null;
       dispatch({ type: "submitSuccess", record: res.record, nextId: makeId() });

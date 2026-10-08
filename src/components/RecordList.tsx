@@ -1,16 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import type { Checkin } from "@/lib/checkins/model";
 import { FAIL_TEXT, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { ownedBy } from "@/lib/session/guard";
+import { useScopedRequest } from "./AuthScope";
 import RecordItem from "./RecordItem";
 
+// 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌거나 로그아웃하면 AuthScope가
+// 이 화면을 새로 만들거나 로그인 화면으로 보내므로, 이전 계정의 목록이 남지 않는다.
 export default function RecordList() {
+  const run = useScopedRequest();
   const [records, setRecords] = useState<Checkin[] | null>(null);
   const [error, setError] = useState<FailReason | null>(null);
   const [loading, setLoading] = useState(true);
+  // 가장 최근에 시작한 조회만 반영한다 (다시 불러오기를 여러 번 눌러도 늦게 온 옛 응답이 덮지 않도록)
+  const latest = useRef(0);
 
   const load = useCallback(async () => {
     const supabase = getBrowserClient();
@@ -19,33 +26,24 @@ export default function RecordList() {
       setLoading(false);
       return;
     }
+    const mine = ++latest.current;
     setLoading(true);
-    const res = await listCheckins(supabase as unknown as RecordsClient);
+    const r = await run(() => listCheckins(supabase as unknown as RecordsClient));
+    // 화면이 닫혔거나 계정이 바뀌었거나 더 새로운 조회가 있으면 반영하지 않는다
+    if (!r.ok || mine !== latest.current) return;
+    const res = r.value;
     if (res.kind === "ok") {
-      setRecords(res.records);
+      // 서버 RLS가 막지만, 요청한 계정의 기록만 화면에 둔다 (한 번 더 확인)
+      setRecords(res.records.filter((rec) => ownedBy(rec, r.ticket)));
       setError(null);
     } else {
       setError(res.reason);
     }
     setLoading(false);
-  }, []);
+  }, [run]);
 
   useEffect(() => {
     void load();
-    const supabase = getBrowserClient();
-    if (!supabase) return;
-    // 다른 탭에서 로그아웃하거나 계정이 바뀌면 화면의 기록을 즉시 비운다.
-    let lastUser: string | null | undefined;
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      const uid = session?.user?.id ?? null;
-      if (lastUser !== undefined && uid !== lastUser) {
-        setRecords(null);
-        if (uid) void load();
-        else window.location.replace("/login?signedOut=1");
-      }
-      lastUser = uid;
-    });
-    return () => sub.subscription.unsubscribe();
   }, [load]);
 
   function replace(rec: Checkin) {
