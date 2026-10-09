@@ -1,0 +1,52 @@
+name: Danguan checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/account-scope-isolation
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Local PostgreSQL tests with synthetic data
+        run: npm run test:db
+
+  browser-components:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install isolated browser test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/danguan-browser-tools" --no-audit --no-fund playwright@1.62.1
+          node "$RUNNER_TEMP/danguan-browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Actual React screens with synthetic accounts and mocked backend
+        run: |
+          export TEST_PLAYWRIGHT_MODULE="$RUNNER_TEMP/danguan-browser-tools/node_modules/playwright/index.mjs"
+          node scripts/browser/verify.mjs

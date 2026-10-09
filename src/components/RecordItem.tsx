@@ -4,6 +4,8 @@ import { useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import { BURDEN_OPTIONS, NOTE_MAX, TAG_OPTIONS, type Burden, type Checkin, type TagCode } from "@/lib/checkins/model";
 import { FAIL_TEXT, deleteCheckin, updateCheckin, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { ownedBy } from "@/lib/session/guard";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
 import RecordSummary from "./RecordSummary";
 
 type Mode =
@@ -34,7 +36,9 @@ export default function RecordItem({
   const [fail, setFail] = useState<FailReason | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const client = () => getBrowserClient() as unknown as RecordsClient | null;
+  // 수정·삭제 요청도 계정 확인 후 그 계정의 인증으로 고정해 보내고, 늦게 온 응답은 계정·화면이 그대로일 때만 반영한다
+  const run = useScopedRequest();
+  const { guard } = useAuthScope();
 
   function startEdit() {
     setEdit({ burden: record.burden, tags: record.tags, note: record.note ?? "" });
@@ -44,12 +48,24 @@ export default function RecordItem({
   }
 
   async function save(expectedVersion: number) {
-    const c = client();
-    if (!c) return;
+    if (!getBrowserClient()) return;
     setBusy(true);
     setFail(null);
-    const res = await updateCheckin(c, { id: record.id, expectedVersion, ...edit });
+    const r = await run((client) =>
+      updateCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion, ...edit }),
+    );
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setBusy(false);
+      setFail("unknown");
+      return;
+    }
+    const res = r.value;
     setBusy(false);
+    if ((res.kind === "saved" && !ownedBy(res.record, r.ticket)) || (res.kind === "conflict" && !ownedBy(res.server, r.ticket))) {
+      setFail("unknown");
+      return;
+    }
     if (res.kind === "saved") {
       onReplace(res.record);
       setMode({ kind: "view" });
@@ -65,12 +81,24 @@ export default function RecordItem({
   }
 
   async function remove() {
-    const c = client();
-    if (!c) return;
+    if (!getBrowserClient()) return;
     setBusy(true);
     setFail(null);
-    const res = await deleteCheckin(c, { id: record.id, expectedVersion: record.version });
+    const r = await run((client) =>
+      deleteCheckin(client as unknown as RecordsClient, { id: record.id, expectedVersion: record.version }),
+    );
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setBusy(false);
+      setFail("unknown");
+      return;
+    }
+    const res = r.value;
     setBusy(false);
+    if (res.kind === "conflict" && !ownedBy(res.server, r.ticket)) {
+      setFail("unknown");
+      return;
+    }
     if (res.kind === "deleted" || res.kind === "not_found") {
       onRemove(record.id);
     } else if (res.kind === "conflict") {

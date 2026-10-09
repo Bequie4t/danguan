@@ -9,27 +9,42 @@ import {
   TAG_OPTIONS,
   NOTE_MAX,
   DRAFT_PROBLEM_TEXT,
-  buildCreateParams,
   burdenLabel,
   currentTimeZone,
   formatOccurred,
   localInputValue,
   newDraft,
   type Burden,
-  type CreateCheckinParams,
+  type Checkin,
   type Draft,
 } from "@/lib/checkins/model";
-import { createCheckin, FAIL_TEXT, type RecordsClient } from "@/lib/checkins/api";
+import { FAIL_TEXT, type RecordsClient } from "@/lib/checkins/api";
 import { formReducer, initialFormState } from "@/lib/checkins/formState";
+import { saveDraft, timeLocked, type PendingSave } from "@/lib/checkins/saveFlow";
+import { ownedBy } from "@/lib/session/guard";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
+import RecordSummary from "./RecordSummary";
 
 const makeId = () => crypto.randomUUID();
 
+// 이 화면은 AuthScope 안에서만 쓴다. 계정이 바뀌면 AuthScope가 이 화면을 새로 만들어
+// 입력·동의 상태·재시도 요청·저장 결과가 모두 비워진다.
 export default function CheckinForm() {
+  const { uid, guard } = useAuthScope();
+  const run = useScopedRequest();
   const [consent, setConsent] = useState<ConsentState | "loading">("loading");
   const [state, dispatch] = useReducer(formReducer, undefined, () => initialFormState(newDraft(makeId)));
   const [expanded, setExpanded] = useState(false);
-  // 처음 보낸 요청을 기억했다가, 입력이 그대로면 재시도 때 같은 값을 다시 보낸다.
-  const pending = useRef<{ draft: Draft; params: CreateCheckinParams } | null>(null);
+  // 결과를 확인하지 못한 저장 요청. 다음 시도는 이것부터 확인한다 (saveFlow.ts 규칙).
+  // 어느 계정의 요청인지 함께 기억해 다른 계정으로 다시 보내지 않는다.
+  const pending = useRef<{ uid: string; save: PendingSave } | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [conflictServer, setConflictServer] = useState<Checkin | null>(null);
+
+  function setPending(p: PendingSave | null) {
+    pending.current = p ? { uid, save: p } : null;
+    setLocked(timeLocked(p));
+  }
 
   useEffect(() => {
     const supabase = getBrowserClient();
@@ -37,8 +52,11 @@ export default function CheckinForm() {
       setConsent("error");
       return;
     }
-    getStorageConsent(supabase).then(setConsent);
-  }, []);
+    // 이전 계정에서 시작한 동의 확인 결과는 반영하지 않는다. 확인도 이 계정의 인증으로 고정해 보낸다.
+    void run((client) => getStorageConsent(client)).then((r) => {
+      if ("ticket" in r && guard.isCurrent(r.ticket)) setConsent(r.ok ? r.value : "error");
+    });
+  }, [run, guard]);
 
   // 저장 중이거나 저장에 실패한 입력이 있으면 창을 닫기 전에 묻는다.
   useEffect(() => {
@@ -53,30 +71,49 @@ export default function CheckinForm() {
   }, [state.status]);
 
   async function submit(draft: Draft) {
-    const supabase = getBrowserClient();
-    if (!supabase || state.status === "saving") return;
+    if (!getBrowserClient() || state.status === "saving") return;
 
-    let params: CreateCheckinParams;
-    if (pending.current && pending.current.draft === draft) {
-      params = pending.current.params;
-    } else {
-      const built = buildCreateParams(draft, new Date(), currentTimeZone());
-      if (!built.ok) {
-        dispatch({ type: "invalid", problem: built.problem });
-        return;
-      }
-      params = built.params;
-      pending.current = { draft, params };
+    // 다른 계정에서 만든 재시도 요청은 버린다 (AuthScope가 화면을 새로 만들지만 한 번 더 확인)
+    const prev = pending.current && pending.current.uid === uid ? pending.current.save : null;
+    dispatch({ type: "submitStart" });
+    setConflictServer(null);
+    // 보내기 전에 실제 로그인 계정이 이 화면의 계정인지 확인하고, 요청은 그 계정의 인증으로 고정한다.
+    // 응답이 늦게 와서 그사이 계정이 바뀌었거나 화면이 닫혔으면 아무것도 반영하지 않는다.
+    const r = await run((client) =>
+      saveDraft(client as unknown as RecordsClient, draft, prev, new Date(), currentTimeZone()),
+    );
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      dispatch({ type: "submitFail", reason: "unknown" });
+      return;
+    }
+    const res = r.value;
+    const t = r.ticket;
+    if (res.kind === "conflict" && !ownedBy(res.server, t)) {
+      dispatch({ type: "submitFail", reason: "unknown" });
+      return;
     }
 
-    dispatch({ type: "submitStart" });
-    const res = await createCheckin(supabase as unknown as RecordsClient, params);
     if (res.kind === "saved") {
-      pending.current = null;
+      if (!ownedBy(res.record, t)) {
+        dispatch({ type: "submitFail", reason: "unknown" });
+        return;
+      }
+      setPending(null);
       dispatch({ type: "submitSuccess", record: res.record, nextId: makeId() });
       setExpanded(false);
+      return;
+    }
+    setPending(res.pending);
+    if (res.kind === "invalid") {
+      dispatch({ type: "submitFail", reason: "invalid" });
+      dispatch({ type: "invalid", problem: res.problem });
+    } else if (res.kind === "conflict") {
+      setConflictServer(res.server);
+      dispatch({ type: "submitConflict" });
     } else {
       dispatch({ type: "submitFail", reason: res.reason });
+      if (res.newIdRequired) dispatch({ type: "newId", id: makeId() });
       if (res.reason === "no_consent") setConsent("missing");
     }
   }
@@ -194,8 +231,11 @@ export default function CheckinForm() {
             </span>
           </label>
 
-          <fieldset disabled={saving} className="space-y-2">
+          <fieldset disabled={saving || locked} className="space-y-2">
             <legend className="font-semibold">언제의 일인가요?</legend>
+            {locked && (
+              <p className="text-sm text-muted">저장됐는지 확인하기 전에는 시점을 바꿀 수 없어요. 버거움·생활 항목·메모는 바꿀 수 있어요.</p>
+            )}
             <label className="flex items-center gap-2">
               <input
                 type="radio"
@@ -255,15 +295,15 @@ export default function CheckinForm() {
             <p>{FAIL_TEXT[state.failReason]}</p>
             <div className="flex flex-wrap gap-2">
               {state.failReason === "signed_out" ? (
-                <a href="/login" target="_blank" rel="noopener" className="rounded-lg border border-current px-4 py-2 font-semibold">
-                  새 탭에서 로그인하기
+                <a href="/login" className="rounded-lg border border-current px-4 py-2 font-semibold">
+                  로그인 화면으로 가기 (입력은 사라져요)
                 </a>
               ) : state.failReason === "no_consent" ? (
                 <Link href="/consent?next=/today" className="rounded-lg border border-current px-4 py-2 font-semibold">
-                  동의 내용 보기
+                  동의 화면으로 가기 (입력은 사라져요)
                 </Link>
               ) : null}
-              {state.failReason !== "no_consent" && (
+              {state.failReason !== "no_consent" && state.failReason !== "signed_out" && (
                 <button
                   type="button"
                   onClick={() => submit(state.draft)}
@@ -272,6 +312,28 @@ export default function CheckinForm() {
                   다시 저장하기
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {state.status === "failed" && !state.failReason && conflictServer && (
+          <div role="alert" className="space-y-3 rounded-xl bg-warn-soft p-4 text-warn">
+            <p className="font-semibold">이 기록이 다른 기기에서 먼저 바뀌었어요. 아직 아무것도 덮어쓰지 않았어요.</p>
+            <div className="rounded-lg bg-surface p-3 text-fg">
+              <p className="mb-1 text-sm text-muted">지금 서버에 있는 내용</p>
+              <RecordSummary record={conflictServer} />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => submit(state.draft)}
+                className="rounded-lg bg-accent px-4 py-2 font-semibold text-accent-fg"
+              >
+                지금 입력으로 저장
+              </button>
+              <Link href="/records" className="rounded-lg border border-current px-4 py-2">
+                서버 내용 그대로 두고 내 기록 보기
+              </Link>
             </div>
           </div>
         )}
