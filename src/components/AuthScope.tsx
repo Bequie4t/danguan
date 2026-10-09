@@ -96,8 +96,29 @@ export default function AuthScope({ children, redirectOnLogout = true }: { child
         if (alive && g.generation === startGeneration && authEvents === startEvents) setView({ kind: "error" });
       });
 
+    // 다른 탭의 인증 이벤트가 전달되지 않아도 돌아온 탭은 쿠키의 현재 세션과 대조한다.
+    // 조회 중 발생한 인증 이벤트나 더 새로운 확인을 옛 결과로 덮지 않는다.
+    let focusCheck = 0;
+    const reconcileOnFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      const check = ++focusCheck;
+      const generation = g.generation;
+      const events = authEvents;
+      void currentSessionAuth().then(auth => {
+        if (!alive || check !== focusCheck || g.generation !== generation || authEvents !== events) return;
+        const uid = auth?.uid ?? null;
+        if (!g.setUserIfCurrent(uid, generation) && uid === null) apply(g.uid, g.generation);
+      }).catch(() => {
+        // 일시적 확인 실패는 현재 계정의 입력·재시도 상태를 지우지 않는다.
+      });
+    };
+    window.addEventListener("focus", reconcileOnFocus);
+    document.addEventListener("visibilitychange", reconcileOnFocus);
+
     return () => {
       alive = false;
+      window.removeEventListener("focus", reconcileOnFocus);
+      document.removeEventListener("visibilitychange", reconcileOnFocus);
       sub.subscription.unsubscribe();
       unsubscribeGuard();
       g.dispose();
