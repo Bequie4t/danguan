@@ -46,6 +46,18 @@ export default function ResponseTest() {
         setScreen("records");
         setMessage("다음 조회 응답을 보류합니다. 목록이 이미 열렸다면 다시 불러오기를 누르세요.");
       }}>지연 조회 시작</button>
+      <h2 className="mt-5 font-semibold">계정 전환 후 지연 쓰기 시험</h2>
+      <p className="my-3">A의 가상 데이터만 사용하세요. 작업을 선택한 뒤 아래 화면에서 해당 작업을 한 번 실행하세요. 서버 성공 응답 보류 안내가 뜨면 다른 탭에서 B로 전환하세요. 이 탭을 새로고침하지 말고 B 화면을 확인한 뒤 응답을 전달하세요. A의 성공 안내나 기록이 B 화면에 나타나면 안 됩니다. 삭제는 시험용 가상 기록에만 실행하세요.</p>
+      {([
+        ["create_checkin", "저장 응답 보류 준비"],
+        ["update_checkin", "수정 응답 보류 준비"],
+        ["delete_checkin", "삭제 응답 보류 준비"],
+      ] as const).map(([operation, label]) => <button key={operation} type="button" disabled={!ready}
+        className="mr-2 rounded-lg border border-line px-3 py-2" onClick={() => {
+          control.current?.holdNextWrite(operation);
+          setScreen(operation === "create_checkin" ? "form" : "records");
+          setMessage(`${label}가 완료됐습니다. 가상 데이터로 해당 작업을 한 번 실행하세요.`);
+        }}>{label}</button>)}
       <button type="button" className="ml-2 rounded-lg border border-line px-3 py-2" onClick={() => control.current?.release()}>보류 응답 전달</button>
     </section>
     {ready && <AuthScope redirectOnLogout={false}>{screen === "form" ? <CheckinForm /> : <RecordList />}</AuthScope>}

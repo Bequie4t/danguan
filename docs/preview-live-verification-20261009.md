@@ -51,6 +51,10 @@ ChatGPT가 구현·검토·실행을 맡았다. 동일 AI의 자체 검토이며
 
 운영 배포 전체 소스와 ca03e2a의 완전한 파일 대조는 미완료다. 업로드한 GitHub ZIP은 main 백업과 일치하며 최신 운영 소스의 증거가 아니다. 운영 소스 추출 접근 제한 때문에 이전의 '운영과 완전히 동일' 문구를 최신 결론으로 사용하지 않는다.
 
+2026-10-10 01:06 KST 이후 운영 배포 `dpl_4uiU9NVnvHTFf4ywikqvUVq1EB7s`의 Vercel Source 화면을 다시 읽었다. `AuthScope.tsx`의 화면에서 읽은 인증 초기화·이벤트 처리·UID/generation key 로직은 ca03e2a와 일치한다. 최신 PR의 초기 인증 응답 보호와 focus/visibility 계정 재확인은 운영 화면의 코드에 없다. 주석·공백을 포함한 파일 바이트 일치를 뜻하지 않는다.
+
+운영 `api.ts`에서 create_checkin의 반환 ID와 p_id 검사, update_checkin/delete_checkin의 p_expected_version 전달, conflict 처리, 최근 200개 목록 조회를 확인했다. 읽은 로직은 통합 기준과 일치한다. 운영 saveFlow.ts에서 불확실한 요청의 params 보관과 버전 기반 수정 로직을 확인했다. 저장 API와 saveFlow의 PR 작업 사본은 ca03e2a 대비 git diff가 없다. CheckinForm·RecordList·RecordItem의 차이는 계정 고정 요청, 이전 응답 무시, 소유자 검사와 인증 실패 처리 보완이다. 화면 파일 전체의 운영 대조와 전체 배포 파일 대조는 계속 미완료다. 이번 확인은 읽기만 수행했고 운영 배포·DB는 변경하지 않았다.
+
 ### 3.2 남은 실제 환경 시험
 
 - 지연 생성·수정·삭제 응답이 계정 전환 후 도착하는 실제 DB 시험은 미완료. 모의 시험만 존재.
@@ -58,6 +62,10 @@ ChatGPT가 구현·검토·실행을 맡았다. 동일 AI의 자체 검토이며
 - 같은 메모 3개의 과거 생성 경위는 미확인.
 - 탭 간 인증 이벤트가 전달되지 않은 정확한 원인은 미확정.
 - 기존 로컬 Playwright 실네트워크 시험은 로그인 단계에서 중단됐으며 전체 PASS가 아니다. 정상 Chrome 수동 시험으로 확보한 근거만 인정한다.
+
+### 3.3 운영 화면의 핵심 처리 대조 (2026-10-10 01:08 KST 이후)
+
+같은 운영 배포 Source 화면에서 CheckinForm의 pending 보관, saveDraft 호출, 성공 시 다음 ID 생성, 실패·충돌·동의 누락 처리와 beforeunload 보호를 읽었다. RecordList의 조회·소유자 필터·수정 반영·삭제 반영을 읽었다. RecordItem의 수정·삭제 호출, expectedVersion 전달, not_found 처리, 수정·삭제 충돌 모드를 읽었다. 확인한 핵심 로직은 ca03e2a와 일치한다. PR 작업 사본의 세 파일 git diff를 함께 검토했으며 기존 처리 분기는 보존되고 계정 고정 요청·응답 소유자 검사·인증 실패 시 busy 해제·조회 순서 보호가 추가됐다. 이 결론은 읽은 처리 구간에 한정하며 모든 JSX·문구·전체 파일의 바이트 대조가 완료됐다는 뜻은 아니다. 이번 단계에서는 코드나 운영 상태를 변경하지 않았다.
 
 ## 4. 다음 단계
 

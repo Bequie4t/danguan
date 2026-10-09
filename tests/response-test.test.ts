@@ -44,3 +44,42 @@ test("첫 조회 응답만 보류하고 새 계정 조회는 전달한다", asyn
   assert.equal((await previous).status, 200);
   assert.equal(delivered, true);
 });
+
+for (const operation of ["create_checkin", "update_checkin", "delete_checkin"] as const) {
+  test(`${operation}: 성공 응답만 보류하고 다음 계정 요청은 전달한다`, async () => {
+    let signal!: () => void;
+    const held = new Promise<void>(resolve => { signal = resolve; });
+    const control = createResponseLossTest(async () => new Response("{}"), () => signal());
+    control.holdNextWrite(operation);
+    const url = `${TEST_DATABASE}/rest/v1/rpc/${operation}`;
+    let delivered = false;
+    const pending = control.fetch(url, { method: "POST" }).then(r => { delivered = true; return r; });
+    await held;
+    assert.equal(delivered, false);
+    assert.equal((await control.fetch(url, { method: "POST" })).status, 200);
+    assert.equal(delivered, false);
+    control.release();
+    assert.equal((await pending).status, 200);
+    assert.equal(delivered, true);
+  });
+}
+
+test("대기 중 취소하면 뒤늦은 서버 응답이 새 보류를 만들지 않는다", async () => {
+  let finish!: (response: Response) => void;
+  const backend = new Promise<Response>(resolve => { finish = resolve; });
+  const messages: string[] = [];
+  const control = createResponseLossTest(() => backend, message => messages.push(message));
+  control.holdNextWrite("create_checkin");
+  const request = control.fetch(`${TEST_DATABASE}/rest/v1/rpc/create_checkin`, { method: "POST" });
+  control.cancel();
+  finish(new Response("{}"));
+  assert.equal((await request).status, 200);
+  assert.deepEqual(messages, []);
+});
+
+test("쓰기 거절 응답과 다른 DB 요청은 보류하지 않는다", async () => {
+  const control = createResponseLossTest(async () => new Response("{}", { status: 403 }), () => assert.fail("보류하면 안 됨"));
+  control.holdNextWrite("delete_checkin");
+  assert.equal((await control.fetch("https://other.supabase.co/rest/v1/rpc/delete_checkin", { method: "POST" })).status, 403);
+  assert.equal((await control.fetch(`${TEST_DATABASE}/rest/v1/rpc/delete_checkin`, { method: "POST" })).status, 403);
+});
