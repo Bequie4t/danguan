@@ -28,3 +28,19 @@ test("다른 DB 요청은 건드리지 않고 거절 응답은 정상 전달한�
   assert.equal((await control.fetch("https://other.supabase.co/rest/v1/rpc/create_checkin", { method: "POST" })).status, 403);
   assert.equal((await control.fetch(`${TEST_DATABASE}/rest/v1/rpc/create_checkin`, { method: "POST" })).status, 403);
 });
+
+test("첫 조회 응답만 보류하고 새 계정 조회는 전달한다", async () => {
+  let started!: () => void;
+  const held = new Promise<void>(resolve => { started = resolve; });
+  const control = createResponseLossTest(async () => new Response("[]"), () => started());
+  control.holdNextList();
+  let delivered = false;
+  const previous = control.fetch(`${TEST_DATABASE}/rest/v1/checkins`).then(response => { delivered = true; return response; });
+  await held;
+  assert.equal(delivered, false);
+  assert.equal((await control.fetch(`${TEST_DATABASE}/rest/v1/checkins`)).status, 200);
+  assert.equal(delivered, false);
+  control.release();
+  assert.equal((await previous).status, 200);
+  assert.equal(delivered, true);
+});

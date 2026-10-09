@@ -47,7 +47,7 @@ async function currentSessionAuth(): Promise<SessionAuth | null> {
   return s?.user?.id && s.access_token ? { uid: s.user.id, accessToken: s.access_token } : null;
 }
 
-export default function AuthScope({ children }: { children: ReactNode }) {
+export default function AuthScope({ children, redirectOnLogout = true }: { children: ReactNode; redirectOnLogout?: boolean }) {
   const [guard, setGuard] = useState<SessionGuard | null>(null);
   const [view, setView] = useState<View>({ kind: "checking" });
 
@@ -69,7 +69,7 @@ export default function AuthScope({ children }: { children: ReactNode }) {
         setView({ kind: "in", uid, generation, switched });
       } else {
         setView({ kind: "out" });
-        window.location.replace("/login?signedOut=1");
+        if (redirectOnLogout) window.location.replace("/login?signedOut=1");
       }
     };
     const unsubscribeGuard = g.subscribe(apply);
@@ -102,7 +102,7 @@ export default function AuthScope({ children }: { children: ReactNode }) {
       unsubscribeGuard();
       g.dispose();
     };
-  }, []);
+  }, [redirectOnLogout]);
 
   if (view.kind === "unconfigured") {
     return <p className="text-muted">서버 설정이 아직 되지 않았어요. 도움 화면은 그대로 열려요.</p>;
