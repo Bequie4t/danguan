@@ -83,3 +83,32 @@ test("쓰기 거절 응답과 다른 DB 요청은 보류하지 않는다", async
   assert.equal((await control.fetch("https://other.supabase.co/rest/v1/rpc/delete_checkin", { method: "POST" })).status, 403);
   assert.equal((await control.fetch(`${TEST_DATABASE}/rest/v1/rpc/delete_checkin`, { method: "POST" })).status, 403);
 });
+
+test("응답 유실 후 요청 ID 동일성을 비교하되 ID·메모는 출력하지 않는다", async () => {
+  const messages: string[] = [];
+  const control = createResponseLossTest(async () => new Response("{}"), message => messages.push(message));
+  const url = `${TEST_DATABASE}/rest/v1/rpc/create_checkin`;
+  control.arm();
+  const options = { method: "POST", body: JSON.stringify({ p_id: "synthetic-id", p_note: "synthetic-private-note" }) };
+  await assert.rejects(control.fetch(url, options), TypeError);
+  assert.equal((await control.fetch(url, options)).status, 200);
+  assert.match(messages[1], /최초 요청과 같습니다/);
+  assert.equal(messages.join().includes("synthetic-id"), false);
+  assert.equal(messages.join().includes("synthetic-private-note"), false);
+});
+
+test("다른 ID 재시도는 불일치로 표시하고 취소 뒤에는 비교하지 않는다", async () => {
+  const messages: string[] = [];
+  const control = createResponseLossTest(async () => new Response("{}"), message => messages.push(message));
+  const url = `${TEST_DATABASE}/rest/v1/rpc/create_checkin`;
+  control.arm();
+  await assert.rejects(control.fetch(url, { method: "POST", body: '{"p_id":"first"}' }), TypeError);
+  await control.fetch(url, { method: "POST", body: '{"p_id":"second"}' });
+  assert.match(messages[1], /최초 요청과 다릅니다/);
+  control.arm();
+  await assert.rejects(control.fetch(url, { method: "POST", body: '{"p_id":"third"}' }), TypeError);
+  control.cancel();
+  const count = messages.length;
+  await control.fetch(url, { method: "POST", body: '{"p_id":"third"}' });
+  assert.equal(messages.length, count);
+});
