@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createChunks, stringToBase64URL } from "@supabase/ssr";
-import { clearDeletedSessionCookies, type CookieEntry } from "../src/lib/account/browserSession";
+import { clearDeletedSessionCookies, withSessionCookieLock, type CookieEntry } from "../src/lib/account/browserSession";
 
 const base = "sb-synthetic-auth-token";
 const token = (uid: string) => `e30.${Buffer.from(JSON.stringify({ sub: uid })).toString("base64url")}.fake`;
@@ -41,4 +41,46 @@ test("missing, malformed, ambiguous and mismatched session cookies are never bro
 });
 test("cleanup verifies actual cookie removal instead of assuming success", () => {
   assert.equal(clearDeletedSessionCookies(base, "A", () => [{ name: base, value: session("A") }], () => {}), "unverified");
+});
+
+test("queued cleanup reads the new account after the cookie writer releases its lock", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  let queuedWork: (() => unknown) | undefined;
+  let release: ((value: unknown) => void) | undefined;
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { locks: {
+    request: (name: string, work: () => unknown) => {
+      assert.equal(name, `danguan-cookie-write:${base}`);
+      queuedWork = work;
+      return new Promise(resolve => { release = resolve; });
+    },
+  } } });
+  let cookies = [{ name: base, value: session("A") }];
+  let expired = false;
+  try {
+    const result = withSessionCookieLock(base, () => clearDeletedSessionCookies(base, "A", () => cookies, () => { expired = true; }));
+    // 다른 탭의 B 로그인 쓰기가 먼저 끝난 뒤 대기 중인 정리를 실행한다.
+    cookies = [{ name: base, value: session("B") }];
+    assert.ok(queuedWork);
+    assert.ok(release);
+    release(queuedWork());
+    assert.equal(await result, "changed");
+    assert.equal(expired, false);
+    assert.equal(cookies[0].value, session("B"));
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "navigator", previous);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  }
+});
+
+test("unavailable browser lock rejects without running cookie cleanup", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
+  let ran = false;
+  try {
+    await assert.rejects(withSessionCookieLock(base, () => { ran = true; }), /cookie_lock_unavailable/);
+    assert.equal(ran, false);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "navigator", previous);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  }
 });
