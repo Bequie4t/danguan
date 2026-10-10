@@ -43,6 +43,8 @@ export default function AccountMenu() {
 
   if (state === "in") {
     return (
+      <>
+      <Link href="/account" className="rounded-lg px-2.5 py-2 text-[0.95rem] text-muted hover:bg-accent-soft">계정</Link>
       <button
         type="button"
         onClick={signOut}
@@ -51,6 +53,7 @@ export default function AccountMenu() {
       >
         {busy ? "로그아웃 중…" : "로그아웃"}
       </button>
+      </>
     );
   }
   if (state === "out") {

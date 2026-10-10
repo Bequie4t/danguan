@@ -6,6 +6,7 @@ import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
 import ConsentForm from "../../src/components/ConsentForm";
+import AccountDeletion from "../../src/components/AccountDeletion";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -48,7 +49,7 @@ export const fixture = {
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
   setConsent(uid, granted) { consents.set(uid, granted); },
   mount(screen) {
-    root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
+    root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : screen === "account" ? <AccountDeletion enabled /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
     return this.staleRun((client) => client.rpc("create_checkin", {
@@ -120,6 +121,10 @@ function clientFor(uid) {
 const browserClient = {
   from(table) { return clientFor(fixture.uid).from(table); },
   auth: {
+    async getUser(jwt) {
+      const uid = subject(jwt);
+      return { data: { user: { id: uid, email: uid === A ? "a@example.invalid" : "b@example.invalid" } }, error: null };
+    },
     async getSession() {
       if (fixture.failure === "session_error") throw new Error("fake session failure");
       const uid = fixture.uid;
@@ -143,6 +148,17 @@ function Probe() {
 }
 const root = createRoot(document.getElementById("root"));
 window.__fixture = fixture;
+const originalFetch = window.fetch.bind(window);
+window.fetch = async (url, options) => {
+  if (url !== "/api/account/delete") return originalFetch(url, options);
+  const uid = subject(options.headers.Authorization.slice(7));
+  const body = JSON.parse(options.body);
+  calls.push({ operation: "delete_account", uid, expectedUid: body.expectedUid });
+  const reason = fixture.failure === "delete_wrong_password" ? "wrong_password" : fixture.failure === "delete_uncertain" ? "uncertain" : "deleted";
+  if (reason === "deleted") for (const [id, row] of rows) if (row.owner_id === uid) rows.delete(id);
+  await waitGate("delete_account");
+  return new Response(JSON.stringify({ reason }), { status: reason === "deleted" ? 200 : 503 });
+};
 const initialScreen = new URLSearchParams(location.search).get("screen") ?? "form";
 if (initialScreen === "consent") { consents.set(A, false); consents.set(B, false); }
 fixture.mount(initialScreen);

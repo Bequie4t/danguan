@@ -26,6 +26,8 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
+      - name: Production deletion endpoint fails closed
+        run: node scripts/verify-deletion-disabled.mjs
       - name: Local PostgreSQL tests with synthetic data
         run: npm run test:db
 

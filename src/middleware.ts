@@ -3,7 +3,7 @@ import { createServerClient } from "@supabase/ssr";
 import { supabaseEnv } from "@/lib/supabase/env";
 
 // 로그인이 필요한 화면
-const PROTECTED = ["/today", "/records", "/consent"];
+const PROTECTED = ["/today", "/records", "/consent", "/account"];
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -51,5 +51,5 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   // 도움 화면(/help)과 정적 파일은 로그인·세션 처리를 거치지 않는다.
-  matcher: ["/((?!help|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
+  matcher: ["/((?!help|api/account/delete|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
 };

@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -60,6 +60,46 @@ try {
       passed++;
       console.log(`PASS ${viewport.width}px ${name}`);
     };
+
+    const prepareDelete = async () => {
+      await page.getByText("a@example.invalid", { exact: true }).waitFor();
+      await page.getByLabel("비밀번호 다시 입력").fill("synthetic-password");
+      await page.getByLabel("확인을 위해 ‘계정 삭제’를 입력해 주세요.").fill("계정 삭제");
+    };
+    await scenario("삭제 요청은 원래 A 인증으로 고정되고 늦은 성공이 B 화면에 반영되지 않음", async () => {
+      await fresh("account");
+      await prepareDelete();
+      await page.evaluate(() => window.__fixture.hold("delete_account"));
+      await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("delete_account"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("delete_account"); });
+      await page.getByText("b@example.invalid", { exact: true }).waitFor();
+      assert.equal(await page.getByLabel("비밀번호 다시 입력").inputValue(), "");
+      assert.equal(await page.getByLabel("확인을 위해 ‘계정 삭제’를 입력해 주세요.").inputValue(), "");
+      assert.equal(await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).count(), 0);
+      const snapshot = await page.evaluate(() => window.__fixture.snapshot());
+      const writes = snapshot.calls.filter(c => c.operation === "delete_account");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].uid, writes[0].expectedUid);
+      assert.equal(writes[0].uid, await page.evaluate(() => window.__fixture.A));
+      const b = await page.evaluate(() => window.__fixture.B);
+      assert.ok(snapshot.rows.some(r => r.owner_id === b));
+    });
+    for (const failure of ["delete_wrong_password", "delete_uncertain"]) {
+      await scenario(`삭제 ${failure}는 완료로 표시하지 않고 비밀번호를 비운 뒤 재시도`, async () => {
+        await fresh("account");
+        await prepareDelete();
+        await page.evaluate(f => { window.__fixture.failure = f; }, failure);
+        await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+        await page.getByRole("alert").waitFor();
+        assert.equal(await page.getByLabel("비밀번호 다시 입력").inputValue(), "");
+        assert.equal(await page.getByRole("button", { name: "이 계정 삭제", exact: true }).isDisabled(), true);
+        await page.evaluate(() => { window.__fixture.failure = null; });
+        await page.getByLabel("비밀번호 다시 입력").fill("synthetic-password");
+        await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+        await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).waitFor();
+      });
+    }
 
     await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {
       await fresh("consent");

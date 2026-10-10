@@ -1,4 +1,4 @@
-// 공개 설정값만 읽는다. 비밀 키(service_role / secret)는 이 프로젝트 어디에서도 쓰지 않는다.
+// 이 모듈은 공개 설정값만 읽는다. 계정 삭제 시험의 관리자 키는 별도 서버 전용 모듈에서만 읽는다.
 export function supabaseEnv(): { url: string; key: string } | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
