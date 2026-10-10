@@ -45,6 +45,31 @@ test("첫 조회 응답만 보류하고 새 계정 조회는 전달한다", asyn
   assert.equal(delivered, true);
 });
 
+test("새 시험 화면에서 보류 없이 전달하면 미완료 안내를 표시한다", () => {
+  const messages: string[] = [];
+  const control = createResponseLossTest(async () => new Response("[]"), message => messages.push(message));
+  assert.equal(control.release(), false);
+  assert.match(messages[0], /전달할 보류 응답이 없습니다/);
+});
+
+for (const operation of ["list", "create_checkin"] as const) {
+  test(`${operation}: 보류 중 취소를 응답 전달 완료로 알리지 않는다`, async () => {
+    let signal!: () => void;
+    const held = new Promise<void>(resolve => { signal = resolve; });
+    const messages: string[] = [];
+    const control = createResponseLossTest(async () => new Response("[]"), message => { messages.push(message); signal(); });
+    if (operation === "list") control.holdNextList();
+    else control.holdNextWrite(operation);
+    const request = control.fetch(`${TEST_DATABASE}/rest/v1/${operation === "list" ? "checkins" : "rpc/create_checkin"}`, { method: operation === "list" ? "GET" : "POST" });
+    await held;
+    control.cancel();
+    await request;
+    assert.equal(messages.length, 1);
+    assert.equal(control.release(), false);
+    assert.match(messages[1], /완료로 기록하지 마세요/);
+  });
+}
+
 for (const operation of ["create_checkin", "update_checkin", "delete_checkin"] as const) {
   test(`${operation}: 성공 응답만 보류하고 다음 계정 요청은 전달한다`, async () => {
     let signal!: () => void;
