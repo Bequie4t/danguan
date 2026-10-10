@@ -134,13 +134,14 @@ try {
       } finally { await other.close(); }
     });
 
-    await scenario("알려진 SDK 결함 재현: 만료된 B 쿠키가 A의 늦은 갱신 실패로 제거됨 (보호 통과 아님)", async () => {
+    await scenario("A의 늦은 갱신 실패는 만료된 B 쿠키를 유지하고 로그아웃 알림을 보내지 않음", async () => {
       await fresh("account");
       await page.evaluate(() => window.__fixture.beginRefreshCookieRace());
       await page.evaluate(() => window.__fixture.writeExpiredRefreshB());
       const result = await page.evaluate(() => window.__fixture.finishRefreshCookieRace());
       assert.equal(result.rejected, true);
-      assert.equal(result.remainingUid, null, "현재 결함이 재현되어야 한다. 수정 시 B 유지 검증으로 바꾼다.");
+      assert.equal(result.remainingUid, await page.evaluate(() => window.__fixture.B));
+      assert.equal(result.signedOut, false);
     });
 
     await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {

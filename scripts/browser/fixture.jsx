@@ -3,6 +3,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
+import { enableTestRefreshGuard } from "../../src/lib/account/refreshGuard";
 import { createBrowserClient, parseCookieHeader, serializeCookieHeader, stringToBase64URL, stringFromBase64URL } from "@supabase/ssr";
 import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
@@ -189,6 +190,9 @@ fixture.beginRefreshCookieRace = async () => {
       return response;
     } },
   });
+  enableTestRefreshGuard(sdk.auth);
+  const events = [];
+  sdk.auth.onAuthStateChange(event => { events.push(event); });
   const pending = sdk.auth.refreshSession({ refresh_token: make(A).refresh_token });
   await began;
   fixture.writeExpiredRefreshB = () => write(B);
@@ -197,7 +201,7 @@ fixture.beginRefreshCookieRace = async () => {
     const result = await pending;
     const entry = parseCookieHeader(document.cookie).find(c => c.name === cookie);
     const uid = entry ? JSON.parse(stringFromBase64URL(entry.value.slice(7))).user.id : null;
-    return { rejected: !!result.error, remainingUid: uid };
+    return { rejected: !!result.error, remainingUid: uid, signedOut: events.includes("SIGNED_OUT") };
   };
 };
 const originalFetch = window.fetch.bind(window);

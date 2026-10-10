@@ -2,6 +2,7 @@ import { createBrowserClient, parseCookieHeader, serializeCookieHeader } from "@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseEnv } from "./env";
 import { clearDeletedBrowserSession, sessionCookieName, withSessionCookieLock } from "../account/browserSession";
+import { enableTestRefreshGuard } from "../account/refreshGuard";
 
 let cached: SupabaseClient | null = null;
 
@@ -19,6 +20,7 @@ export function getBrowserClient(): SupabaseClient | null {
       cookies.forEach(({ name, value, options }) => { document.cookie = serializeCookieHeader(name, value, options); });
     }),
   } } : undefined);
+  if (testPreview) enableTestRefreshGuard(cached.auth);
   return cached;
 }
 
