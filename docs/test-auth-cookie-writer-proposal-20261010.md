@@ -1,6 +1,6 @@
 # 분리 테스트 인증 쿠키 작성자 제한 제안
 
-상태: 검토안. 아직 인증 동작에 적용하지 않았다.
+상태: 2026-10-10 21:58 한국시간 사용자 승인 후 구현. 정확한 최신 CI/Preview 적용 결과는 PR 설명을 우선한다.
 
 ## 확인한 문제
 src/middleware.ts는 createServerClient.auth.getUser()를 호출하고 setAll에서 응답에 인증 쿠키를 쓴다. 브라우저 Web Lock은 HTTP Set-Cookie와 함께 작동하지 않는다. A 요청의 늦은 응답이 B 로그인 후 같은 이름의 쿠키를 덮어쓰는 경로가 남아 있다. 실제 서비스 계정으로 이 응답 순서를 시험하지 않았으므로 발생 완료로 표현하지 않는다.
@@ -18,6 +18,8 @@ src/middleware.ts는 createServerClient.auth.getUser()를 호출하고 setAll에
 - 비로그인 화면의 기록·메모 미표시, B 기록만 표시, 동의/저장/수정/삭제의 기존 검증을 반복한다.
 
 ## 승인과 한계
-일반 페이지의 서버 로그인 판정 시점이 브라우저 판정으로 이동하는 인증 방식 변경이다. 사용자의 추가 인증 변경 별도 승인 요구에 따라 적용 전에 승인받는다. 새 보안 권한·관리자 키·운영 DB·운영 배포 변경은 제안하지 않는다. 구버전 탭·가입 확인 콜백·다른 기기·토큰 저장 직전 경쟁은 여전히 별도 과제다.
+일반 페이지의 서버 로그인 판정 시점이 브라우저 판정으로 이동하는 인증 방식 변경이다. 사용자의 추가 인증 변경 별도 승인 요구에 따라 적용 전에 승인받았다. TEST_BROWSER_AUTH_PREVIEW_ENABLED=true를 이 브랜치 Preview에만 설정한다. 새 보안 권한·관리자 키·운영 DB·운영 배포 변경은 없다. 구버전 탭·가입 확인 콜백·다른 기기·토큰 저장 직전 경쟁은 여전히 별도 과제다.
+
+구현: src/lib/account/browserAuthConfig.ts 및 src/middleware.ts. tests/browser-auth-config.test.ts는 production/다른 DB/플래그 없음과 콜백/API 제외를 검증한다. scripts/verify-browser-auth-pages.mjs는 실제 Next HTTP 및 선택적 Chromium 두 탭 지연 응답 시험을 수행한다. 두 탭 시험의 B 쿠키 쓰기는 가상 로그인 완료를 나타내며 실제 Supabase 로그인은 아니다.
 
 ChatGPT가 소스 검토와 제안 작성을 수행했다. 독립 보안 검토가 아니다.

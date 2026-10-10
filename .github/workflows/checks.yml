@@ -28,6 +28,8 @@ jobs:
       - run: npm run build
       - name: Production deletion endpoint fails closed
         run: node scripts/verify-deletion-disabled.mjs
+      - name: Test page authentication gate with synthetic settings
+        run: node scripts/verify-browser-auth-pages.mjs
       - name: Local PostgreSQL tests with synthetic data
         run: npm run test:db
 
@@ -52,3 +54,4 @@ jobs:
         run: |
           export TEST_PLAYWRIGHT_MODULE="$RUNNER_TEMP/danguan-browser-tools/node_modules/playwright/index.mjs"
           node scripts/browser/verify.mjs
+          node scripts/verify-browser-auth-pages.mjs --browser
