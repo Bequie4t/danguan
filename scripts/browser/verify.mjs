@@ -16,7 +16,7 @@ const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
 await build({
   absWorkingDir: root, entryPoints: [fixturePath], bundle: true,
   outfile: resolve(work, "fixture.js"), format: "iife", platform: "browser", jsx: "automatic",
-  define: { "process.env.NODE_ENV": '"production"', "process.env.NEXT_PUBLIC_SUPABASE_URL": '"https://synthetic.supabase.co"', "process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY": '"synthetic-public-key"' },
+  define: { "process.env.NODE_ENV": '"production"', "process.env.NEXT_PUBLIC_SUPABASE_URL": '"https://synthetic.supabase.co"', "process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY": '"synthetic-public-key"', "process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED": '"true"' },
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
@@ -144,6 +144,20 @@ try {
       assert.equal(result.signedOut, false);
     });
 
+    for (const failure of [false, true]) await scenario(`인증 작업 잠금: A ${failure ? "제거" : "저장"} 경계에서 대기한 B 실제 SDK 로그인 쿠키 유지`, async () => {
+      await fresh("form");
+      const result = await page.evaluate(failure => window.__fixture.transactionCookieRace(failure), failure);
+      assert.equal(result.retainedB, true);
+      assert.equal(result.signins, 1);
+      assert.equal(result.finalEvent, "SIGNED_IN");
+    });
+    for (const operation of ["cleanup", "callback"]) await scenario(`인증 작업 잠금: ${operation} 직접 작성자가 대기 후 B 쿠키를 보존`, async () => {
+      await fresh("form");
+      const result = await page.evaluate(operation => window.__fixture.transactionDirectWriter(operation), operation);
+      assert.equal(result.waited, true);
+      assert.equal(result.result, "changed");
+      assert.equal(result.retainedB, true);
+    });
     const callback = async (existing = false) => {
       await context.clearCookies();
       await context.addCookies([{ name: "sb-synthetic-auth-token-code-verifier", value: "base64-" + Buffer.from(JSON.stringify("synthetic-verifier")).toString("base64url"), url: base }]);

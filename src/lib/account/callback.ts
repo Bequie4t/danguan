@@ -2,6 +2,7 @@ import { AuthClient, type Session } from "@supabase/supabase-js";
 import { createChunks, DEFAULT_COOKIE_OPTIONS, isChunkLike, parseCookieHeader, serializeCookieHeader, stringFromBase64URL, stringToBase64URL } from "@supabase/ssr";
 import { sessionCookieName, withSessionCookieLock, type CookieEntry } from "./browserSession";
 import { tokenSubject } from "../session/guard";
+import { authTransactionsEnabled, withAuthTransaction } from "./authTransaction";
 
 export function projectCookies(cookies: CookieEntry[], base: string): CookieEntry[] {
   return cookies.filter(c => isChunkLike(c.name, base) || (c.name.startsWith(`${base}-`) && /-code-verifier(?:\.\d+)?$/.test(c.name)));
@@ -58,11 +59,12 @@ export function readCallbackCookies(url: string): CookieEntry[] {
 }
 export async function completeBrowserCallback(url: string, key: string, code: string, expected: CookieEntry[], flowId?: string, shouldCommit: () => boolean = () => true): Promise<"saved" | "changed" | "error"> {
   try {
-    const unchanged = await withSessionCookieLock(sessionCookieName(url), () => shouldCommit() && sameCookies(expected, readCallbackCookies(url)));
+    const transaction = <T,>(work: () => Promise<T>) => authTransactionsEnabled(url, process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED) ? withAuthTransaction(sessionCookieName(url), work) : work();
+    const unchanged = await transaction(() => withSessionCookieLock(sessionCookieName(url), () => shouldCommit() && sameCookies(expected, readCallbackCookies(url))));
     if (!unchanged) return "changed";
     const session = await exchangeIsolatedCode(url, key, code, expected, fetch, flowId);
     if (!session) return "error";
-    return await withSessionCookieLock(sessionCookieName(url), () => shouldCommit() && commitCallbackSession(sessionCookieName(url), expected, session,
-      () => readCallbackCookies(url), (name, value, maxAge) => { document.cookie = serializeCookieHeader(name, value, { ...DEFAULT_COOKIE_OPTIONS, maxAge }); }, flowId)) ? "saved" : "changed";
+    return await transaction(() => withSessionCookieLock(sessionCookieName(url), () => shouldCommit() && commitCallbackSession(sessionCookieName(url), expected, session,
+      () => readCallbackCookies(url), (name, value, maxAge) => { document.cookie = serializeCookieHeader(name, value, { ...DEFAULT_COOKIE_OPTIONS, maxAge }); }, flowId))) ? "saved" : "changed";
   } catch { return "error"; }
 }

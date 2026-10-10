@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AuthClient, type Session } from "@supabase/supabase-js";
 import { enableTestRefreshGuard } from "../src/lib/account/refreshGuard";
+import { authWriteTransaction, strictAuthLock } from "../src/lib/account/authTransaction";
+import { queuedLocks } from "./helpers/auth-locks";
 
 // 실제 네트워크·DB·토큰을 사용하지 않는 설치 SDK의 공개 API 회귀 시험.
 const key = "synthetic-refresh-order";
@@ -11,7 +13,7 @@ const session = (id: string): Session => ({
   user: { id, app_metadata: {}, user_metadata: {}, aud: "authenticated", created_at: "2026-01-01T00:00:00Z" },
 });
 
-function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; beforeRemove?: (values: Map<string, string>) => void } = {}) {
+function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; beforeRemove?: (values: Map<string, string>) => void; lock?: typeof strictAuthLock; passwordLogin?: boolean } = {}) {
   const values = new Map([[key, JSON.stringify(session("A"))]]);
   let respond!: (response: Response) => void;
   let started!: () => void;
@@ -21,6 +23,7 @@ function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; bef
   const auth = new AuthClient({
     url: "https://synthetic.invalid/auth/v1", storageKey: key,
     autoRefreshToken: false, detectSessionInUrl: false, persistSession: true,
+    ...(hooks.lock ? { lock: hooks.lock } : {}),
     storage: {
       getItem: name => values.get(name) ?? null,
       setItem: (name, value) => { if (name === key) hooks.beforeSet?.(values); values.set(name, value); },
@@ -29,6 +32,7 @@ function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; bef
     fetch: async input => {
       assert.match(String(input), /^https:\/\/synthetic\.invalid\/auth\/v1\/token\?/);
       requests += 1;
+      if (hooks.passwordLogin && String(input).includes("grant_type=password")) return new Response(JSON.stringify(session("B")), { status: 200, headers: { "Content-Type": "application/json" } });
       started();
       return response;
     },
@@ -103,8 +107,8 @@ test("guard still clears the original expired A when its own refresh is rejected
   assert.equal(events.includes("SIGNED_OUT"), true);
 });
 
-// Known unresolved reproductions: passing means the race was reproduced, NOT protection success.
-test("[unresolved reproduction] B replacement inside A refresh storage write is overwritten", async () => {
+// Transaction-off comparisons: passing reproduces the bug, NOT protection success.
+test("[transaction off reproduction] B replacement inside A refresh storage write is overwritten", async () => {
   let armed = false;
   const f = fixture({ beforeSet: values => {
     if (armed) { armed = false; values.set(key, JSON.stringify(session("B"))); }
@@ -123,7 +127,7 @@ test("[unresolved reproduction] B replacement inside A refresh storage write is 
   assert.equal(events.includes("TOKEN_REFRESHED"), true);
 });
 
-test("[unresolved reproduction] B replacement inside rejected A refresh removal is erased", async () => {
+test("[transaction off reproduction] B replacement inside rejected A refresh removal is erased", async () => {
   let armed = false;
   const f = fixture({ beforeRemove: values => {
     if (armed) { armed = false; values.set(key, JSON.stringify(session("B"))); }
@@ -142,3 +146,39 @@ test("[unresolved reproduction] B replacement inside rejected A refresh removal 
   assert.equal(f.values.has(key), false, "reproduces undesirable removal, not protection");
   assert.equal(events.includes("SIGNED_OUT"), true);
 });
+
+for (const failure of [false, true]) {
+  test(`transaction protection: B auth writer queued at A ${failure ? "removal" : "save"} boundary is retained`, async () => {
+    const locks = queuedLocks();
+    let armed = false;
+    let bWrite: Promise<void> | undefined;
+    const replaceB = (values: Map<string, string>) => {
+      if (!armed) return;
+      armed = false;
+      bWrite = authWriteTransaction(f.auth, key, async () => {
+        const result = await f.auth.signInWithPassword({ email: "b@example.invalid", password: "synthetic-password" });
+        assert.equal(result.error, null);
+        assert.equal(result.data.session?.user.id, "B");
+      }, locks);
+    };
+    const f = fixture({ passwordLogin: true, lock: (name, timeout, work) => strictAuthLock(name, timeout, work, locks),
+      ...(failure ? { beforeRemove: replaceB } : { beforeSet: replaceB }),
+    });
+    enableTestRefreshGuard(f.auth);
+    const events: string[] = [];
+    f.auth.onAuthStateChange(event => { events.push(event); });
+    const pending = f.auth.refreshSession({ refresh_token: session("A").refresh_token });
+    await f.requestStarted;
+    if (failure) f.values.set(key, JSON.stringify({ ...session("A"), expires_at: 1 }));
+    armed = true;
+    f.respond(new Response(JSON.stringify(failure ? { message: "Synthetic rejection" } : session("A")), { status: failure ? 400 : 200, headers: { "Content-Type": "application/json" } }));
+    await pending;
+    assert.ok(bWrite, "writer must attempt to enter at the storage boundary");
+    await bWrite;
+    assert.equal(JSON.parse(f.values.get(key)!).user.id, "B");
+    assert.equal(events.at(-1), "SIGNED_IN");
+    const count = events.length;
+    await Promise.resolve();
+    assert.equal(events.length, count, "old refresh must not notify after B commit");
+  });
+}

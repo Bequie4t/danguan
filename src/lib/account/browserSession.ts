@@ -1,5 +1,6 @@
 import { stringFromBase64URL, isChunkLike, parseCookieHeader, serializeCookieHeader } from "@supabase/ssr";
 import { tokenSubject } from "../session/guard";
+import { authTransactionsEnabled, withAuthTransaction } from "./authTransaction";
 
 export type CookieEntry = { name: string; value: string };
 export type CleanupResult = "cleared" | "absent" | "changed" | "unverified";
@@ -42,8 +43,9 @@ export async function withSessionCookieLock<T>(base: string, work: () => T): Pro
 
 export async function clearDeletedBrowserSession(url: string, deletedUid: string): Promise<CleanupResult> {
   const base = sessionCookieName(url);
-  return withSessionCookieLock(base, () => clearDeletedSessionCookies(base, deletedUid,
+  const clear = () => withSessionCookieLock(base, () => clearDeletedSessionCookies(base, deletedUid,
     () => parseCookieHeader(document.cookie).map(c => ({ name: c.name, value: c.value ?? "" })),
     names => names.forEach(name => { document.cookie = serializeCookieHeader(name, "", { path: "/", sameSite: "lax", maxAge: 0 }); }),
   ));
+  return authTransactionsEnabled(url, process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED) ? withAuthTransaction(base, clear) : clear();
 }

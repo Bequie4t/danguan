@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseEnv } from "./env";
 import { clearDeletedBrowserSession, sessionCookieName, withSessionCookieLock } from "../account/browserSession";
 import { enableTestRefreshGuard } from "../account/refreshGuard";
+import { authTransactionsEnabled, authWriteTransaction, strictAuthLock } from "../account/authTransaction";
 
 let cached: SupabaseClient | null = null;
 
@@ -14,14 +15,26 @@ export function getBrowserClient(): SupabaseClient | null {
   // 이번 Preview 시험의 브라우저 쿠키 쓰기와 삭제 후 정리를 같은 Web Lock으로 직렬화한다.
   // 운영 프로젝트의 인증 동작은 바꾸지 않는다.
   const testPreview = env.url === "https://wxqmqksqjmfflzghozuq.supabase.co" && typeof document !== "undefined" && typeof navigator !== "undefined" && !!navigator.locks;
-  cached = createBrowserClient(env.url, env.key, testPreview ? { cookies: {
+  const transactionMode = authTransactionsEnabled(env.url, process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED);
+  cached = createBrowserClient(env.url, env.key, { ...(transactionMode ? { auth: { lock: strictAuthLock } } : {}), ...(testPreview ? { cookies: {
     getAll: () => parseCookieHeader(document.cookie).map(c => ({ name: c.name, value: c.value ?? "" })),
     setAll: cookies => withSessionCookieLock(sessionCookieName(env.url), () => {
       cookies.forEach(({ name, value, options }) => { document.cookie = serializeCookieHeader(name, value, options); });
     }),
-  } } : undefined);
+  } } : {}) });
   if (testPreview) enableTestRefreshGuard(cached.auth);
   return cached;
+}
+
+export async function runBrowserAuthWrite<T>(client: SupabaseClient, work: () => Promise<T>): Promise<T> {
+  const env = supabaseEnv();
+  if (!env || !authTransactionsEnabled(env.url, process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED)) return work();
+  return authWriteTransaction(client.auth, sessionCookieName(env.url), work);
+}
+
+export function browserAuthTransactionMode(): boolean {
+  const env = supabaseEnv();
+  return !!env && authTransactionsEnabled(env.url, process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED);
 }
 
 export async function clearDeletedAccountSession(uid: string) {

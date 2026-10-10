@@ -4,6 +4,9 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
 import { enableTestRefreshGuard } from "../../src/lib/account/refreshGuard";
+import { authWriteTransaction, strictAuthLock, withAuthTransaction } from "../../src/lib/account/authTransaction";
+import { TEST_DATABASE } from "../../src/lib/checkins/responseTest";
+import { completeBrowserCallback, readCallbackCookies } from "../../src/lib/account/callback";
 import { createBrowserClient, parseCookieHeader, serializeCookieHeader, stringToBase64URL, stringFromBase64URL } from "@supabase/ssr";
 import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
@@ -205,6 +208,82 @@ fixture.beginRefreshCookieRace = async () => {
     const uid = entry ? JSON.parse(stringFromBase64URL(entry.value.slice(7))).user.id : null;
     return { rejected: !!result.error, remainingUid: uid, signedOut: events.includes("SIGNED_OUT") };
   };
+};
+// 실제 Chromium Web Locks + SSR cookie adapter + SDK password sign-in.
+// 대기 중인 B 로그인은 A 저장/제거가 끝난 뒤 실행한다. fetch는 모두 가상 응답이다.
+fixture.transactionCookieRace = async failure => {
+  const cookie = "sb-transaction-fixture-auth-token";
+  const make = uid => ({ user: { id: uid, app_metadata: {}, user_metadata: {}, aud: "authenticated", created_at: now },
+    access_token: token(uid), refresh_token: `synthetic-transaction-${uid}`, token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600 });
+  document.cookie = serializeCookieHeader(cookie, "base64-" + stringToBase64URL(JSON.stringify(make(A))), { path: "/" });
+  let sdk;
+  let queued;
+  let armed = false;
+  let signins = 0;
+  const events = [];
+  sdk = createBrowserClient("https://transaction-fixture.supabase.co", "synthetic-public-key", {
+    isSingleton: false, auth: { lock: strictAuthLock },
+    cookies: {
+      getAll: () => parseCookieHeader(document.cookie).map(c => ({ name: c.name, value: c.value ?? "" })),
+      setAll: cookies => {
+        if (armed) {
+          armed = false;
+          queued = authWriteTransaction(sdk.auth, cookie, async () => {
+            const result = await sdk.auth.signInWithPassword({ email: "b@example.invalid", password: "synthetic-password" });
+            if (result.error) throw new Error("synthetic_signin_failed");
+          });
+        }
+        return withSessionCookieLock(cookie, () => cookies.forEach(({ name, value, options }) => { document.cookie = serializeCookieHeader(name, value, options); }));
+      },
+    },
+    global: { fetch: async input => {
+      const u = new URL(String(input));
+      if (u.origin !== "https://transaction-fixture.supabase.co" || u.pathname !== "/auth/v1/token") throw new Error("unexpected_synthetic_request");
+      if (u.searchParams.get("grant_type") === "password") {
+        signins++;
+        return new Response(JSON.stringify(make(B)), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (u.searchParams.get("grant_type") !== "refresh_token") throw new Error("unexpected_synthetic_grant");
+      if (failure) document.cookie = serializeCookieHeader(cookie, "base64-" + stringToBase64URL(JSON.stringify({ ...make(A), expires_at: 1 })), { path: "/" });
+      armed = true;
+      return new Response(JSON.stringify(failure ? { message: "Synthetic rejection" } : make(A)), { status: failure ? 400 : 200, headers: { "Content-Type": "application/json" } });
+    } },
+  });
+  enableTestRefreshGuard(sdk.auth);
+  sdk.auth.onAuthStateChange(event => { events.push(event); });
+  try {
+    await sdk.auth.refreshSession({ refresh_token: make(A).refresh_token });
+    if (!queued) throw new Error("synthetic_boundary_not_reached");
+    await queued;
+    const entry = parseCookieHeader(document.cookie).find(c => c.name === cookie);
+    const uid = entry ? JSON.parse(stringFromBase64URL(entry.value.slice(7))).user.id : null;
+    return { retainedB: uid === B, signins, finalEvent: events.at(-1) };
+  } finally { await sdk.auth.stopAutoRefresh(); }
+};
+fixture.transactionDirectWriter = async operation => {
+  const cookie = "sb-wxqmqksqjmfflzghozuq-auth-token";
+  const write = uid => withSessionCookieLock(cookie, () => {
+    document.cookie = serializeCookieHeader(cookie, "base64-" + stringToBase64URL(JSON.stringify({ user: { id: uid }, access_token: token(uid) })), { path: "/" });
+  });
+  await write(A);
+  const expected = readCallbackCookies(TEST_DATABASE);
+  let release;
+  let began;
+  const started = new Promise(resolve => { began = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const holder = withAuthTransaction(cookie, async () => { began(); await gate; await write(B); });
+  await started;
+  let finished = false;
+  const direct = (operation === "cleanup" ? clearDeletedBrowserSession(TEST_DATABASE, A)
+    : completeBrowserCallback(TEST_DATABASE, "synthetic-public-key", "synthetic-code", expected)).then(result => { finished = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const waited = !finished;
+  release();
+  await holder;
+  const result = await direct;
+  const entry = parseCookieHeader(document.cookie).find(c => c.name === cookie);
+  const uid = entry ? JSON.parse(stringFromBase64URL(entry.value.slice(7))).user.id : null;
+  return { waited, result, retainedB: uid === B };
 };
 const originalFetch = window.fetch.bind(window);
 window.fetch = async (url, options) => {
