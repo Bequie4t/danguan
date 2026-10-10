@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
+import { getBrowserClient, runBrowserAuthWrite } from "@/lib/supabase/client";
 
 type Mode = "signin" | "signup";
 
@@ -26,7 +26,7 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
     setMessage(null);
     try {
       if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { error } = await runBrowserAuthWrite(supabase, () => supabase.auth.signInWithPassword({ email, password }));
         if (error) {
           setMessage({
             tone: "warn",
@@ -40,11 +40,11 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
         window.location.replace(`/consent?next=${encodeURIComponent(next)}`);
       } else {
         const redirect = `${window.location.origin}/auth/callback?next=${encodeURIComponent(`/consent?next=${next}`)}`;
-        const { data, error } = await supabase.auth.signUp({
+        const { data, error } = await runBrowserAuthWrite(supabase, () => supabase.auth.signUp({
           email,
           password,
           options: { emailRedirectTo: redirect },
-        });
+        }));
         if (error) {
           setMessage({
             tone: "warn",

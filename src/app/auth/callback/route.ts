@@ -1,12 +1,25 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServerClient } from "@/lib/supabase/server";
 import { safeNext } from "@/lib/safeNext";
+import { browserOnlyPageAuth } from "@/lib/account/browserAuthConfig";
 
 // 가입 확인 메일의 링크가 돌아오는 곳. 코드를 세션으로 바꾼 뒤 동의 화면으로 보낸다.
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const next = safeNext(url.searchParams.get("next"), "/consent");
+
+  if (browserOnlyPageAuth(process.env.VERCEL_ENV, process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.TEST_BROWSER_AUTH_PREVIEW_ENABLED, "/auth/callback")) {
+    const target = new URL("/auth/complete", url.origin);
+    if (code && code.length <= 4096) target.searchParams.set("exchange_code", code);
+    target.searchParams.set("next", next);
+    const flowId = url.searchParams.get("sb_flow_id");
+    if (flowId && /^[a-zA-Z0-9_-]{1,128}$/.test(flowId)) target.searchParams.set("exchange_flow", flowId);
+    const response = NextResponse.redirect(target);
+    response.headers.set("Cache-Control", "private, no-store, max-age=0");
+    response.headers.set("Referrer-Policy", "no-referrer");
+    return response;
+  }
 
   const supabase = await getServerClient();
   if (code && supabase) {

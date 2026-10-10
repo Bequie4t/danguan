@@ -16,7 +16,7 @@ const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
 await build({
   absWorkingDir: root, entryPoints: [fixturePath], bundle: true,
   outfile: resolve(work, "fixture.js"), format: "iife", platform: "browser", jsx: "automatic",
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', "process.env.NEXT_PUBLIC_SUPABASE_URL": '"https://synthetic.supabase.co"', "process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY": '"synthetic-public-key"', "process.env.NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED": '"true"' },
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -60,6 +60,155 @@ try {
       passed++;
       console.log(`PASS ${viewport.width}px ${name}`);
     };
+
+    const prepareDelete = async () => {
+      await page.getByText("a@example.invalid", { exact: true }).waitFor();
+      await page.getByLabel("비밀번호 다시 입력").fill("synthetic-password");
+      await page.getByLabel("확인을 위해 ‘계정 삭제’를 입력해 주세요.").fill("계정 삭제");
+    };
+    await scenario("삭제 요청은 원래 A 인증으로 고정되고 늦은 성공이 B 화면에 반영되지 않음", async () => {
+      await fresh("account");
+      await prepareDelete();
+      await page.evaluate(() => window.__fixture.hold("delete_account"));
+      await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("delete_account"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("delete_account"); });
+      await page.getByText("b@example.invalid", { exact: true }).waitFor();
+      assert.equal(await page.getByLabel("비밀번호 다시 입력").inputValue(), "");
+      assert.equal(await page.getByLabel("확인을 위해 ‘계정 삭제’를 입력해 주세요.").inputValue(), "");
+      assert.equal(await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).count(), 0);
+      const snapshot = await page.evaluate(() => window.__fixture.snapshot());
+      const writes = snapshot.calls.filter(c => c.operation === "delete_account");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].uid, writes[0].expectedUid);
+      assert.equal(writes[0].uid, await page.evaluate(() => window.__fixture.A));
+      const b = await page.evaluate(() => window.__fixture.B);
+      assert.ok(snapshot.rows.some(r => r.owner_id === b));
+      assert.equal(snapshot.calls.filter(c => c.operation === "cleanup_deleted_session").length, 0);
+    });
+    for (const failure of ["delete_wrong_password", "delete_uncertain"]) {
+      await scenario(`삭제 ${failure}는 완료로 표시하지 않고 비밀번호를 비운 뒤 재시도`, async () => {
+        await fresh("account");
+        await prepareDelete();
+        await page.evaluate(f => { window.__fixture.failure = f; }, failure);
+        await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+        await page.getByRole("alert").waitFor();
+        assert.equal(await page.getByLabel("비밀번호 다시 입력").inputValue(), "");
+        assert.equal(await page.getByRole("button", { name: "이 계정 삭제", exact: true }).isDisabled(), true);
+        await page.evaluate(() => { window.__fixture.failure = null; });
+        await page.getByLabel("비밀번호 다시 입력").fill("synthetic-password");
+        await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+        await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).waitFor();
+      });
+    }
+
+    await scenario("삭제 후 로그인 정보 정리 실패는 화면에서 재시도할 수 있음", async () => {
+      await fresh("account");
+      await prepareDelete();
+      await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+      await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).waitFor();
+      await page.evaluate(() => { window.__fixture.failure = "cleanup_failed"; });
+      await page.getByRole("button", { name: "로그인 화면으로 이동", exact: true }).click();
+      await page.getByText("이 기기의 로그인 정보를 정리하지 못했어요. 화면을 새로고침해 주세요.", { exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "로그인 화면으로 이동", exact: true }).isDisabled(), false);
+      const calls = await page.evaluate(() => window.__fixture.snapshot().calls);
+      const cleanups = calls.filter(c => c.operation === "cleanup_deleted_session");
+      assert.equal(cleanups.length, 1);
+      assert.equal(cleanups[0].uid, await page.evaluate(() => window.__fixture.A));
+    });
+
+    await scenario("실제 두 탭의 공유 쿠키에서 삭제한 A 정리는 새 B 세션을 보존", async () => {
+      await fresh("account");
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=account`);
+        await other.waitForFunction(() => !!window.__fixture?.writeSyntheticSession);
+        await page.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.A); });
+        await other.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.B); });
+        const result = await page.evaluate(() => window.__fixture.clearSyntheticSession(window.__fixture.A));
+        assert.equal(result, "changed");
+        assert.ok(await other.evaluate(() => document.cookie.includes("sb-synthetic-auth-token=")));
+        await other.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.A); });
+        assert.equal(await page.evaluate(() => window.__fixture.clearSyntheticSession(window.__fixture.A)), "cleared");
+        assert.equal(await other.evaluate(() => document.cookie.includes("sb-synthetic-auth-token=")), false);
+      } finally { await other.close(); }
+    });
+
+    await scenario("A의 늦은 갱신 실패는 만료된 B 쿠키를 유지하고 로그아웃 알림을 보내지 않음", async () => {
+      await fresh("account");
+      await page.evaluate(() => window.__fixture.beginRefreshCookieRace());
+      await page.evaluate(() => window.__fixture.writeExpiredRefreshB());
+      const result = await page.evaluate(() => window.__fixture.finishRefreshCookieRace());
+      assert.equal(result.rejected, true);
+      assert.equal(result.remainingUid, await page.evaluate(() => window.__fixture.B));
+      assert.equal(result.signedOut, false);
+    });
+
+    for (const failure of [false, true]) await scenario(`인증 작업 잠금: A ${failure ? "제거" : "저장"} 경계에서 대기한 B 실제 SDK 로그인 쿠키 유지`, async () => {
+      await fresh("form");
+      const result = await page.evaluate(failure => window.__fixture.transactionCookieRace(failure), failure);
+      assert.equal(result.retainedB, true);
+      assert.equal(result.signins, 1);
+      assert.equal(result.finalEvent, "SIGNED_IN");
+    });
+    for (const operation of ["cleanup", "callback"]) await scenario(`인증 작업 잠금: ${operation} 직접 작성자가 대기 후 B 쿠키를 보존`, async () => {
+      await fresh("form");
+      const result = await page.evaluate(operation => window.__fixture.transactionDirectWriter(operation), operation);
+      assert.equal(result.waited, true);
+      assert.equal(result.result, "changed");
+      assert.equal(result.retainedB, true);
+    });
+    const callback = async (existing = false) => {
+      await context.clearCookies();
+      await context.addCookies([{ name: "sb-synthetic-auth-token-code-verifier", value: "base64-" + Buffer.from(JSON.stringify("synthetic-verifier")).toString("base64url"), url: base }]);
+      if (existing) {
+        const id = "00000000-0000-4000-8000-00000000000b";
+        const value = { user: { id }, access_token: `e30.${Buffer.from(JSON.stringify({ sub: id })).toString("base64url")}.fake` };
+        await context.addCookies([{ name: "sb-synthetic-auth-token", value: "base64-" + Buffer.from(JSON.stringify(value)).toString("base64url"), url: base }]);
+      }
+      await page.goto(`${base}/?screen=callback&exchange_code=synthetic-code&next=%2Fconsent-done`);
+      await page.getByRole("heading", { name: "가입 확인", exact: true }).waitFor();
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).waitFor();
+      assert.equal(new URL(page.url()).search, "");
+    };
+    await scenario("기존 로그인 계정은 선택 전 자동으로 교환하거나 지우지 않음", async () => {
+      await callback(true);
+      await page.getByText("이미 로그인한 계정이 있어요.", { exact: false }).waitFor();
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 0);
+      const raw = (await context.cookies()).find(c => c.name === "sb-synthetic-auth-token").value;
+      assert.equal(JSON.parse(Buffer.from(raw.slice(7), "base64url").toString()).user.id, await page.evaluate(() => window.__fixture.B));
+    });
+    await scenario("가입 확인은 자동 교환 없이 클릭 한 번으로 완료하고 URL 코드를 제거", async () => {
+      await callback();
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 0);
+      await page.evaluate(() => window.__fixture.hold("callback_exchange"));
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.waitForFunction(() => window.__fixture.started("callback_exchange"));
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 1);
+      assert.equal(await page.getByRole("button", { name: "가입 확인 계속하기" }).count(), 0);
+      await page.evaluate(() => window.__fixture.release("callback_exchange"));
+      await page.waitForURL("**/consent-done");
+      assert.ok((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token"));
+      assert.equal((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token-code-verifier"), false);
+    });
+    await scenario("가입 확인 교환 중 B 로그인은 B 쿠키를 유지하고 이전 교환 결과를 버림", async () => {
+      await callback();
+      await page.evaluate(() => window.__fixture.hold("callback_exchange"));
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.waitForFunction(() => window.__fixture.started("callback_exchange"));
+      await page.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.B); f.release("callback_exchange"); });
+      await page.getByText("확인하는 동안 로그인 상태가 바뀌어서 현재 계정을 유지했어요.", { exact: false }).waitFor();
+      const raw = (await context.cookies()).find(c => c.name === "sb-synthetic-auth-token").value;
+      assert.equal(JSON.parse(Buffer.from(raw.slice(7), "base64url").toString()).user.id, await page.evaluate(() => window.__fixture.B));
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 1);
+    });
+    await scenario("가입 확인 실패는 완료로 표시하지 않고 재로그인 안내", async () => {
+      await callback();
+      await page.evaluate(() => { window.__fixture.failure = "callback_error"; });
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.getByText("링크를 확인하지 못했어요.", { exact: false }).waitFor();
+      assert.equal((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token"), false);
+    });
 
     await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {
       await fresh("consent");

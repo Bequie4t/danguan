@@ -12,6 +12,11 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
   let generation = 0;
   let retryId: string | null = null;
   let release: (() => void) | null = null;
+  const finishHold = () => {
+    const pending = release;
+    release = null;
+    pending?.();
+  };
   const wrapped: typeof fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), typeof location === "undefined" ? TEST_DATABASE : location.href);
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -40,6 +45,7 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
         release = resolve;
         notify("저장·수정·삭제 성공 응답을 보류했습니다. 같은 주소의 다른 탭에서 B로 전환하고, 이 탭의 B 화면을 확인한 뒤 보류 응답을 전달하세요.");
       });
+      if (mine !== generation) return response;
       release = null;
       notify("보류한 쓰기 응답을 전달했습니다. 새 계정의 입력과 기록이 바뀌지 않는지 확인하세요.");
       return response;
@@ -56,6 +62,7 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
         release = resolve;
         notify("조회 성공 응답을 보류했습니다. 다른 탭에서 A 로그아웃 후 B 로그인하고, 이 화면에 B 기록이 뜨면 보류 응답 전달을 누르세요.");
       });
+      if (mine !== generation) return response;
       release = null;
       notify("보류한 이전 조회 응답을 전달했습니다. 이전 계정 기록이 나타나지 않는지 확인하세요.");
       return response;
@@ -78,12 +85,21 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
   };
   return {
     fetch: wrapped,
-    arm: () => { generation++; retryId = null; release?.(); armed = true; holdList = false; holdWrite = null; },
-    holdNextList: () => { generation++; retryId = null; release?.(); holdList = true; armed = false; holdWrite = null; },
+    arm: () => { generation++; retryId = null; finishHold(); armed = true; holdList = false; holdWrite = null; },
+    holdNextList: () => { generation++; retryId = null; finishHold(); holdList = true; armed = false; holdWrite = null; },
     holdNextWrite: (operation: "create_checkin" | "update_checkin" | "delete_checkin") => {
-      generation++; retryId = null; release?.(); holdWrite = operation; armed = false; holdList = false;
+      generation++; retryId = null; finishHold(); holdWrite = operation; armed = false; holdList = false;
     },
-    release: () => { release?.(); },
-    cancel: () => { generation++; retryId = null; armed = false; holdList = false; holdWrite = null; release?.(); },
+    release: () => {
+      const pending = release;
+      if (!pending) {
+        notify("전달할 보류 응답이 없습니다. 화면이 다시 열리거나 시험이 취소됐을 수 있어요. 이번 지연 시험은 완료로 기록하지 마세요.");
+        return false;
+      }
+      release = null;
+      pending();
+      return true;
+    },
+    cancel: () => { generation++; retryId = null; armed = false; holdList = false; holdWrite = null; finishHold(); },
   };
 }
