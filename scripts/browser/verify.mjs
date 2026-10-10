@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -60,6 +60,56 @@ try {
       passed++;
       console.log(`PASS ${viewport.width}px ${name}`);
     };
+
+    await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {
+      await fresh("consent");
+      await page.evaluate(() => { const f = window.__fixture; f.setConsent(f.A, true); f.hold("consents"); f.mount("consent"); });
+      await page.waitForFunction(() => window.__fixture.started("consents"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("consents"); });
+      await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
+      assert.equal(await page.locator("#consent-check").isChecked(), false);
+      assert.equal(new URL(page.url()).searchParams.get("screen"), "consent");
+    });
+
+    await scenario("A 동의 체크·지연 저장이 B로 넘어가지 않음", async () => {
+      await fresh("consent");
+      await page.locator("#consent-check").check();
+      await page.evaluate(() => window.__fixture.hold("grant_consent"));
+      await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("grant_consent"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("grant_consent"); });
+      await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
+      assert.equal(await page.locator("#consent-check").isChecked(), false);
+      assert.equal(new URL(page.url()).searchParams.get("screen"), "consent");
+      const writes = (await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "grant_consent");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].uid, await page.evaluate(() => window.__fixture.A));
+    });
+
+    await scenario("동의 조회 실패 후 같은 화면에서 다시 확인", async () => {
+      await fresh("consent");
+      await page.evaluate(() => { window.__fixture.failure = "consent_query_error"; window.__fixture.mount("consent"); });
+      await page.getByRole("button", { name: "다시 확인하기", exact: true }).waitFor();
+      await page.evaluate(() => { window.__fixture.failure = null; });
+      await page.getByRole("button", { name: "다시 확인하기", exact: true }).click();
+      await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "다시 확인하기", exact: true }).count(), 0);
+    });
+
+    for (const failure of ["session_error", "bad_token", "consent_write_error"]) {
+      await scenario(`${failure}: 동의 체크 유지·잠금 해제·재시도`, async () => {
+        await fresh("consent");
+        await page.locator("#consent-check").check();
+        await page.evaluate(failure => { window.__fixture.failure = failure; }, failure);
+        await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).click();
+        await page.getByText("동의를 저장하지 못했어요. 연결을 확인하고 다시 눌러 주세요.", { exact: true }).waitFor();
+        assert.equal(await page.locator("#consent-check").isChecked(), true);
+        assert.equal(await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).isEnabled(), true);
+        await page.evaluate(() => { window.__fixture.failure = null; });
+        await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).click();
+        await page.waitForURL(/\/consent-done$/);
+      });
+    }
 
     await scenario("A 잔존 콜백: B 전환과 같은 순간 호출해도 요청 없음", async () => {
       await fresh();

@@ -1,38 +1,50 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuthScope, useScopedRequest } from "./AuthScope";
 import { getStorageConsent, grantStorageConsent, type ConsentState } from "@/lib/consent";
 import { CONSENT_POLICY_VERSION } from "@/lib/checkins/model";
 
 // 동의 문구는 출시 전 개인정보 전문가 검토가 필요하다 (개발용 초안).
 export default function ConsentForm({ next }: { next: string }) {
+  const { guard } = useAuthScope();
+  const run = useScopedRequest();
+  const checks = useRef(0);
+  const submitting = useRef(false);
   const [state, setState] = useState<ConsentState | "loading">("loading");
   const [checked, setChecked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
-    const supabase = getBrowserClient();
-    if (!supabase) {
+  const checkConsent = useCallback(async () => {
+    const check = ++checks.current;
+    setState("loading");
+    const result = await run(getStorageConsent);
+    if (check !== checks.current || !("ticket" in result) || !guard.isCurrent(result.ticket)) return;
+    if (!result.ok) {
       setState("error");
       return;
     }
-    getStorageConsent(supabase).then((s) => {
-      if (s === "granted") window.location.replace(next);
-      else setState(s);
-    });
-  }, [next]);
+    if (result.value === "granted") window.location.replace(next);
+    else setState(result.value);
+  }, [guard, run, next]);
+
+  useEffect(() => {
+    void checkConsent();
+    return () => { checks.current += 1; };
+  }, [checkConsent]);
 
   async function agree() {
-    const supabase = getBrowserClient();
-    if (!supabase || !checked) return;
+    if (!checked || submitting.current) return;
+    submitting.current = true;
     setBusy(true);
     setFailed(false);
-    const ok = await grantStorageConsent(supabase);
+    const result = await run(grantStorageConsent);
+    if (!("ticket" in result) || !guard.isCurrent(result.ticket)) return;
+    submitting.current = false;
     setBusy(false);
-    if (ok) window.location.replace(next);
+    if (result.ok && result.value) window.location.replace(next);
     else setFailed(true);
   }
 
@@ -46,9 +58,12 @@ export default function ConsentForm({ next }: { next: string }) {
       </div>
 
       {state === "error" && (
-        <p role="alert" className="rounded-xl bg-warn-soft p-3 text-warn">
-          동의 상태를 확인하지 못했어요. 새로고침하거나 잠시 후 다시 시도해 주세요.
-        </p>
+        <div role="alert" className="space-y-2 rounded-xl bg-warn-soft p-3 text-warn">
+          <p>동의 상태를 확인하지 못했어요. 연결을 확인하고 다시 시도해 주세요.</p>
+          <button type="button" disabled={busy} onClick={() => void checkConsent()} className="min-h-12 rounded-xl border border-current px-4 py-2 disabled:opacity-60">
+            다시 확인하기
+          </button>
+        </div>
       )}
 
       <section className="space-y-3 rounded-2xl border border-line bg-surface p-5">
@@ -70,6 +85,7 @@ export default function ConsentForm({ next }: { next: string }) {
         <input
           id="consent-check"
           type="checkbox"
+          disabled={busy}
           checked={checked}
           onChange={(e) => setChecked(e.target.checked)}
           className="mt-1 h-6 w-6 accent-[var(--accent)]"

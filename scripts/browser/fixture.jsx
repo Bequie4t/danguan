@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
+import ConsentForm from "../../src/components/ConsentForm";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -12,6 +13,8 @@ const listeners = new Set();
 const rows = new Map();
 const gates = new Map();
 const calls = [];
+const consents = new Map();
+let screenGeneration = 0;
 const now = new Date().toISOString();
 function seed(uid, suffix, note) {
   const id = `00000000-0000-4000-9000-${suffix}`;
@@ -43,8 +46,9 @@ export const fixture = {
   },
   started(operation) { return gates.get(operation)?.started === true; },
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
+  setConsent(uid, granted) { consents.set(uid, granted); },
   mount(screen) {
-    root.render(<AuthScope><Probe />{screen === "records" ? <RecordList /> : <CheckinForm />}</AuthScope>);
+    root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
     return this.staleRun((client) => client.rpc("create_checkin", {
@@ -96,9 +100,17 @@ function clientFor(uid) {
         select() { return query; }, eq() { return query; }, is() { return query; }, order() { return query; },
         async limit() {
           calls.push({ operation: table, uid });
-          const data = table === "consents" ? [{ id: "fake-consent" }] : [...rows.values()].filter((r) => r.owner_id === uid).map((r) => ({ ...r }));
+          const data = table === "consents" ? (consents.get(uid) !== false ? [{ id: "fake-consent" }] : []) : [...rows.values()].filter((r) => r.owner_id === uid).map((r) => ({ ...r }));
           await waitGate(table);
+          if (table === "consents" && fixture.failure === "consent_query_error") return { data: null, error: { message: "fake consent query failure" } };
           return { data, error: null };
+        },
+        async insert() {
+          calls.push({ operation: "grant_consent", uid });
+          if (fixture.failure === "consent_write_error") return { error: { message: "fake consent write failure" } };
+          consents.set(uid, true);
+          await waitGate("grant_consent");
+          return { error: null };
         },
       };
       return query;
@@ -106,6 +118,7 @@ function clientFor(uid) {
   };
 }
 const browserClient = {
+  from(table) { return clientFor(fixture.uid).from(table); },
   auth: {
     async getSession() {
       if (fixture.failure === "session_error") throw new Error("fake session failure");
@@ -130,4 +143,6 @@ function Probe() {
 }
 const root = createRoot(document.getElementById("root"));
 window.__fixture = fixture;
-fixture.mount(new URLSearchParams(location.search).get("screen") ?? "form");
+const initialScreen = new URLSearchParams(location.search).get("screen") ?? "form";
+if (initialScreen === "consent") { consents.set(A, false); consents.set(B, false); }
+fixture.mount(initialScreen);
