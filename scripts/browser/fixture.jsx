@@ -151,6 +151,8 @@ window.__fixture = fixture;
 const originalFetch = window.fetch.bind(window);
 window.fetch = async (url, options) => {
   if (url !== "/api/account/delete") return originalFetch(url, options);
+  // 보호된 Preview는 인증 쿠키가 빠진 요청을 앱 API에 전달하지 않는다.
+  if (options.credentials !== "same-origin") return new Response(JSON.stringify({ error: { code: "401" } }), { status: 401 });
   const uid = subject(options.headers.Authorization.slice(7));
   const body = JSON.parse(options.body);
   calls.push({ operation: "delete_account", uid, expectedUid: body.expectedUid });

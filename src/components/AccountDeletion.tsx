@@ -52,7 +52,8 @@ export default function AccountDeletion({ enabled }: { enabled: boolean }) {
     setMessage(null);
     const result = await run(async (auth) => {
       const response = await fetch("/api/account/delete", {
-        method: "POST", credentials: "omit", cache: "no-store",
+        // Vercel Preview 보호 쿠키를 전달한다. 삭제 API는 쿠키 대신 아래 고정 Bearer로만 사용자를 검증한다.
+        method: "POST", credentials: "same-origin", cache: "no-store",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.accessToken}` },
         body: JSON.stringify({ expectedUid: auth.uid, password, confirmation }),
       });
