@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import { authTransactionsEnabled, strictAuthLock } from "../src/lib/account/authTransaction";
 import { TEST_DATABASE } from "../src/lib/checkins/responseTest";
 import { queuedLocks } from "./helpers/auth-locks";
+import { NavigatorLockAcquireTimeoutError } from "@supabase/supabase-js";
+import { AuthTransactionTimeout } from "../src/lib/account/authTransaction";
+
+test("timeout is recognized by the SDK auto refresh skip path", () => {
+  assert.ok(new AuthTransactionTimeout() instanceof NavigatorLockAcquireTimeoutError);
+});
 
 test("auth transaction is off by default and rejects a different database", () => {
   assert.equal(authTransactionsEnabled(TEST_DATABASE, "true"), true);

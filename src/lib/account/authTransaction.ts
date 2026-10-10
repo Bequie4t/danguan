@@ -1,11 +1,10 @@
-import type { AuthClient } from "@supabase/supabase-js";
+import { NavigatorLockAcquireTimeoutError, type AuthClient } from "@supabase/supabase-js";
 import { TEST_DATABASE } from "../checkins/responseTest";
 
 export function authTransactionsEnabled(database: string | undefined, enabled: string | undefined): boolean {
   return database === TEST_DATABASE && enabled === "true";
 }
-export class AuthTransactionTimeout extends Error {
-  readonly isAcquireTimeout = true;
+export class AuthTransactionTimeout extends NavigatorLockAcquireTimeoutError {
   constructor() { super("auth_transaction_wait_failed"); this.name = "AuthTransactionTimeout"; }
 }
 // SDK navigatorLock의 시간 초과 시 잠금 강탈 경로를 사용하지 않는다.
