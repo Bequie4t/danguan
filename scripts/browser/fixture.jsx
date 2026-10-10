@@ -3,7 +3,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
-import { serializeCookieHeader, stringToBase64URL } from "@supabase/ssr";
+import { createBrowserClient, parseCookieHeader, serializeCookieHeader, stringToBase64URL, stringFromBase64URL } from "@supabase/ssr";
 import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
@@ -158,6 +158,48 @@ fixture.writeSyntheticSession = uid => withSessionCookieLock("sb-synthetic-auth-
   document.cookie = serializeCookieHeader("sb-synthetic-auth-token", "base64-" + stringToBase64URL(JSON.stringify({ user: { id: uid }, access_token: token(uid) })), { path: "/" });
 });
 fixture.clearSyntheticSession = uid => clearDeletedBrowserSession("https://synthetic.supabase.co", uid);
+// 실제 SSR 쿠키 어댑터 + 설치 인증 SDK. 네트워크는 제어 응답으로 완전히 대체한다.
+fixture.beginRefreshCookieRace = async () => {
+  const cookie = "sb-refresh-fixture-auth-token";
+  const make = (uid, expired = false) => ({
+    user: { id: uid, app_metadata: {}, user_metadata: {}, aud: "authenticated", created_at: now },
+    access_token: token(uid), refresh_token: `synthetic-refresh-${uid}`,
+    token_type: "bearer", expires_in: 3600, expires_at: expired ? 1 : Math.floor(Date.now() / 1000) + 3600,
+  });
+  const write = uid => withSessionCookieLock(cookie, () => {
+    document.cookie = serializeCookieHeader(cookie, "base64-" + stringToBase64URL(JSON.stringify(make(uid, uid === B))), { path: "/" });
+  });
+  await write(A);
+  let release;
+  let started;
+  const began = new Promise(resolve => { started = resolve; });
+  const response = new Promise(resolve => { release = resolve; });
+  const sdk = createBrowserClient("https://refresh-fixture.supabase.co", "synthetic-public-key", {
+    isSingleton: false,
+    auth: { autoRefreshToken: false, detectSessionInUrl: false },
+    cookies: {
+      getAll: () => parseCookieHeader(document.cookie).map(c => ({ name: c.name, value: c.value ?? "" })),
+      setAll: cookies => withSessionCookieLock(cookie, () => {
+        cookies.forEach(({ name, value, options }) => { document.cookie = serializeCookieHeader(name, value, options); });
+      }),
+    },
+    global: { fetch: async url => {
+      if (!String(url).startsWith("https://refresh-fixture.supabase.co/auth/v1/token?")) throw new Error("unexpected_synthetic_request");
+      started();
+      return response;
+    } },
+  });
+  const pending = sdk.auth.refreshSession({ refresh_token: make(A).refresh_token });
+  await began;
+  fixture.writeExpiredRefreshB = () => write(B);
+  fixture.finishRefreshCookieRace = async () => {
+    release(new Response(JSON.stringify({ code: "refresh_token_not_found", message: "Synthetic rejection" }), { status: 400, headers: { "Content-Type": "application/json" } }));
+    const result = await pending;
+    const entry = parseCookieHeader(document.cookie).find(c => c.name === cookie);
+    const uid = entry ? JSON.parse(stringFromBase64URL(entry.value.slice(7))).user.id : null;
+    return { rejected: !!result.error, remainingUid: uid };
+  };
+};
 const originalFetch = window.fetch.bind(window);
 window.fetch = async (url, options) => {
   if (url !== "/api/account/delete") return originalFetch(url, options);
