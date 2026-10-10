@@ -1,12 +1,13 @@
 import { deleteOwnAccount } from "@/lib/account/delete";
 import { deletionConfig, deletionDependencies } from "@/lib/account/server";
+import { sameOrigin } from "@/lib/account/http";
 
 export const dynamic = "force-dynamic";
 const attempts = new Map<string, { count: number; expires: number; busy: boolean }>();
 const reply = (status: number, reason: string) => Response.json({ reason }, { status, headers: { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
 
 export async function POST(request: Request) {
-  if (request.headers.get("origin") !== new URL(request.url).origin) return reply(403, "invalid_request");
+  if (!sameOrigin(request)) return reply(403, "invalid_request");
   if (request.headers.get("content-type")?.split(";")[0].trim() !== "application/json") return reply(415, "invalid_request");
   const config = deletionConfig();
   if (!config) return reply(503, "disabled");

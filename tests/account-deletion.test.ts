@@ -3,10 +3,20 @@ import { test } from "node:test";
 import { deleteOwnAccount, type DeleteDependencies } from "../src/lib/account/delete";
 import { deletionAllowed } from "../src/lib/account/config";
 import { TEST_DATABASE } from "../src/lib/checkins/responseTest";
+import { sameOrigin } from "../src/lib/account/http";
 
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "bbbbbbbb-0000-4000-8000-000000000002";
 const input = { token: "fake-original-A", expectedUid: A, password: "fake-password" };
+test("same-origin validation uses received Host and rejects cross-site or forwarded host substitution", () => {
+  const request = (origin: string | undefined, host = "127.0.0.1:3198") => new Request("http://localhost:3198/api/account/delete", {
+    headers: { host, ...(origin ? { origin } : {}), "x-forwarded-host": "other.invalid" },
+  });
+  assert.equal(sameOrigin(request("http://127.0.0.1:3198")), true);
+  assert.equal(sameOrigin(request("https://other.invalid")), false);
+  assert.equal(sameOrigin(request(undefined)), false);
+  assert.equal(sameOrigin(request("http://127.0.0.1:3198", "bad.invalid,127.0.0.1:3198")), false);
+});
 function fixture(overrides: Partial<DeleteDependencies> = {}) {
   const calls: string[] = [];
   const dependencies: DeleteDependencies = {
