@@ -10,6 +10,7 @@ import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
 import ConsentForm from "../../src/components/ConsentForm";
 import AccountDeletion from "../../src/components/AccountDeletion";
+import CallbackConfirmation from "../../src/components/CallbackConfirmation";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -52,6 +53,7 @@ export const fixture = {
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
   setConsent(uid, granted) { consents.set(uid, granted); },
   mount(screen) {
+    if (screen === "callback") { root.render(<CallbackConfirmation />); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : screen === "account" ? <AccountDeletion enabled /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
@@ -206,6 +208,12 @@ fixture.beginRefreshCookieRace = async () => {
 };
 const originalFetch = window.fetch.bind(window);
 window.fetch = async (url, options) => {
+  if (String(url).startsWith("https://synthetic.supabase.co/auth/v1/token?grant_type=pkce")) {
+    calls.push({ operation: "callback_exchange" });
+    await waitGate("callback_exchange");
+    if (fixture.failure === "callback_error") return new Response(JSON.stringify({ message: "Synthetic expired link" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ user: { id: A, aud: "authenticated", app_metadata: {}, user_metadata: {}, created_at: now }, access_token: token(A), refresh_token: "synthetic-callback-refresh", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (url !== "/api/account/delete") return originalFetch(url, options);
   // 보호된 Preview는 인증 쿠키가 빠진 요청을 앱 API에 전달하지 않는다.
   if (options.credentials !== "same-origin") return new Response(JSON.stringify({ error: { code: "401" } }), { status: 401 });

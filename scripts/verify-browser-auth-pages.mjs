@@ -33,6 +33,21 @@ for (const [environment, database, flag, enabled] of cases) {
         assert.match(await response.text(), /로그인 상태를 확인하는 중/);
       } else assert.match(response.headers.get("location"), /\/login\?next=/);
     }
+    if (enabled) {
+      const callback = await fetch(origin + "/auth/callback?code=synthetic-code&next=https%3A%2F%2Foutside.invalid", { redirect: "manual" });
+      assert.equal(callback.status, 307);
+      assert.equal(callback.headers.get("set-cookie"), null);
+      assert.equal(callback.headers.get("referrer-policy"), "no-referrer");
+      const target = new URL(callback.headers.get("location"));
+      assert.equal(target.pathname, "/auth/complete");
+      assert.equal(target.searchParams.get("exchange_code"), "synthetic-code");
+      assert.equal(target.searchParams.get("next"), "/consent");
+      const complete = await fetch(target, { redirect: "manual" });
+      assert.equal(complete.status, 200);
+      assert.equal(complete.headers.get("set-cookie"), null);
+      assert.match(complete.headers.get("cache-control"), /no-store/);
+      assert.equal(complete.headers.get("referrer-policy"), "no-referrer");
+    }
     if (browserMode) {
       const { chromium } = await import(pathToFileURL(process.env.TEST_PLAYWRIGHT_MODULE).href);
       browser = await chromium.launch({ headless: true });

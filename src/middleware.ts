@@ -24,6 +24,7 @@ export async function middleware(request: NextRequest) {
     // 늦은 일반 페이지 응답이 새 계정의 인증 쿠키를 덮어쓰지 않도록
     // 이 경로에서는 Supabase 클라이언트를 생성하거나 쿠키를 쓰지 않는다.
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
+    if (path === "/auth/callback" || path === "/auth/complete") response.headers.set("Referrer-Policy", "no-referrer");
     return response;
   }
 

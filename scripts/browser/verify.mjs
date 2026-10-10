@@ -16,7 +16,7 @@ const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
 await build({
   absWorkingDir: root, entryPoints: [fixturePath], bundle: true,
   outfile: resolve(work, "fixture.js"), format: "iife", platform: "browser", jsx: "automatic",
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', "process.env.NEXT_PUBLIC_SUPABASE_URL": '"https://synthetic.supabase.co"', "process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY": '"synthetic-public-key"' },
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
@@ -142,6 +142,58 @@ try {
       assert.equal(result.rejected, true);
       assert.equal(result.remainingUid, await page.evaluate(() => window.__fixture.B));
       assert.equal(result.signedOut, false);
+    });
+
+    const callback = async (existing = false) => {
+      await context.clearCookies();
+      await context.addCookies([{ name: "sb-synthetic-auth-token-code-verifier", value: "base64-" + Buffer.from(JSON.stringify("synthetic-verifier")).toString("base64url"), url: base }]);
+      if (existing) {
+        const id = "00000000-0000-4000-8000-00000000000b";
+        const value = { user: { id }, access_token: `e30.${Buffer.from(JSON.stringify({ sub: id })).toString("base64url")}.fake` };
+        await context.addCookies([{ name: "sb-synthetic-auth-token", value: "base64-" + Buffer.from(JSON.stringify(value)).toString("base64url"), url: base }]);
+      }
+      await page.goto(`${base}/?screen=callback&exchange_code=synthetic-code&next=%2Fconsent-done`);
+      await page.getByRole("heading", { name: "가입 확인", exact: true }).waitFor();
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).waitFor();
+      assert.equal(new URL(page.url()).search, "");
+    };
+    await scenario("기존 로그인 계정은 선택 전 자동으로 교환하거나 지우지 않음", async () => {
+      await callback(true);
+      await page.getByText("이미 로그인한 계정이 있어요.", { exact: false }).waitFor();
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 0);
+      const raw = (await context.cookies()).find(c => c.name === "sb-synthetic-auth-token").value;
+      assert.equal(JSON.parse(Buffer.from(raw.slice(7), "base64url").toString()).user.id, await page.evaluate(() => window.__fixture.B));
+    });
+    await scenario("가입 확인은 자동 교환 없이 클릭 한 번으로 완료하고 URL 코드를 제거", async () => {
+      await callback();
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 0);
+      await page.evaluate(() => window.__fixture.hold("callback_exchange"));
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.waitForFunction(() => window.__fixture.started("callback_exchange"));
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 1);
+      assert.equal(await page.getByRole("button", { name: "가입 확인 계속하기" }).count(), 0);
+      await page.evaluate(() => window.__fixture.release("callback_exchange"));
+      await page.waitForURL("**/consent-done");
+      assert.ok((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token"));
+      assert.equal((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token-code-verifier"), false);
+    });
+    await scenario("가입 확인 교환 중 B 로그인은 B 쿠키를 유지하고 이전 교환 결과를 버림", async () => {
+      await callback();
+      await page.evaluate(() => window.__fixture.hold("callback_exchange"));
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.waitForFunction(() => window.__fixture.started("callback_exchange"));
+      await page.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.B); f.release("callback_exchange"); });
+      await page.getByText("확인하는 동안 로그인 상태가 바뀌어서 현재 계정을 유지했어요.", { exact: false }).waitFor();
+      const raw = (await context.cookies()).find(c => c.name === "sb-synthetic-auth-token").value;
+      assert.equal(JSON.parse(Buffer.from(raw.slice(7), "base64url").toString()).user.id, await page.evaluate(() => window.__fixture.B));
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "callback_exchange").length, 1);
+    });
+    await scenario("가입 확인 실패는 완료로 표시하지 않고 재로그인 안내", async () => {
+      await callback();
+      await page.evaluate(() => { window.__fixture.failure = "callback_error"; });
+      await page.getByRole("button", { name: "가입 확인 계속하기" }).click();
+      await page.getByText("링크를 확인하지 못했어요.", { exact: false }).waitFor();
+      assert.equal((await context.cookies()).some(c => c.name === "sb-synthetic-auth-token"), false);
     });
 
     await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {

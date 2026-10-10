@@ -10,8 +10,9 @@ test("browser page auth requires exact Preview, test database and explicit flag"
     }
   }
 });
-test("auth callback and API keep their own server authentication", () => {
-  for (const path of ["/auth/callback", "/auth/other", "/api/account/delete", "/api/other"]) {
+test("approved callback pages bypass server refresh; other auth routes and API do not", () => {
+  for (const path of ["/auth/callback", "/auth/complete"]) assert.equal(browserOnlyPageAuth("preview", db, "true", path), true);
+  for (const path of ["/auth/other", "/api/account/delete", "/api/other"]) {
     assert.equal(browserOnlyPageAuth("preview", db, "true", path), false);
   }
 });
