@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
+import { clearDeletedAccountSession, getBrowserClient } from "@/lib/supabase/client";
 import { useAuthScope, useScopedAuthRequest } from "./AuthScope";
 
 const messages: Record<string, string> = {
@@ -18,7 +18,7 @@ const messages: Record<string, string> = {
 };
 
 export default function AccountDeletion({ enabled }: { enabled: boolean }) {
-  const { guard } = useAuthScope();
+  const { guard, uid } = useAuthScope();
   const run = useScopedAuthRequest();
   const [email, setEmail] = useState<string | null>(null);
   const [password, setPassword] = useState("");
@@ -27,6 +27,17 @@ export default function AccountDeletion({ enabled }: { enabled: boolean }) {
   const [deleted, setDeleted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const submitting = useRef(false);
+
+  async function leaveDeletedAccount() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await clearDeletedAccountSession(uid);
+      if (result === "cleared" || result === "absent") window.location.replace("/login?accountDeleted=1");
+      else if (result === "changed") window.location.reload();
+      else { setBusy(false); setMessage("이 기기의 로그인 정보를 정리하지 못했어요. 화면을 새로고침해 주세요."); }
+    } catch { setBusy(false); setMessage("이 기기의 로그인 정보를 정리하지 못했어요. 화면을 새로고침해 주세요."); }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -79,7 +90,8 @@ export default function AccountDeletion({ enabled }: { enabled: boolean }) {
         <div role="status" className="space-y-3">
           <p>계정과 이 계정의 기록·저장 동의를 삭제했어요. 이 계정으로 다시 로그인할 수 없어요.</p>
           {/* 공유 브라우저의 signOut을 자동 호출하지 않는다. 늦은 A 응답으로 B 세션을 지울 수 있다. */}
-          <Link href="/login" className="inline-flex min-h-12 items-center rounded-xl border border-line px-4">로그인 화면으로 이동</Link>
+          <button type="button" disabled={busy} onClick={() => void leaveDeletedAccount()} className="inline-flex min-h-12 items-center rounded-xl border border-line px-4 disabled:opacity-60">{busy ? "로그인 정보 정리 중…" : "로그인 화면으로 이동"}</button>
+          {message && <p role="alert">{message}</p>}
         </div>
       ) : (
         <>

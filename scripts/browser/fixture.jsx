@@ -2,6 +2,8 @@
 // 인증·DB를 메모리 모의 응답으로 대체하고 실제 React 컴포넌트와 훅을 렌더한다.
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
+import { serializeCookieHeader, stringToBase64URL } from "@supabase/ssr";
 import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
@@ -137,6 +139,10 @@ const browserClient = {
   },
 };
 export function getBrowserClient() { return browserClient; }
+export async function clearDeletedAccountSession(uid) {
+  calls.push({ operation: "cleanup_deleted_session", uid });
+  return fixture.failure === "cleanup_failed" ? "unverified" : fixture.uid === uid ? "cleared" : "changed";
+}
 export function pinnedClient(jwt) {
   if (fixture.failure === "request_error") throw new Error("fake client setup failure");
   return clientFor(subject(jwt));
@@ -148,6 +154,10 @@ function Probe() {
 }
 const root = createRoot(document.getElementById("root"));
 window.__fixture = fixture;
+fixture.writeSyntheticSession = uid => withSessionCookieLock("sb-synthetic-auth-token", () => {
+  document.cookie = serializeCookieHeader("sb-synthetic-auth-token", "base64-" + stringToBase64URL(JSON.stringify({ user: { id: uid }, access_token: token(uid) })), { path: "/" });
+});
+fixture.clearSyntheticSession = uid => clearDeletedBrowserSession("https://synthetic.supabase.co", uid);
 const originalFetch = window.fetch.bind(window);
 window.fetch = async (url, options) => {
   if (url !== "/api/account/delete") return originalFetch(url, options);

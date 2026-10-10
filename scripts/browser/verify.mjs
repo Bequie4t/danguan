@@ -84,6 +84,7 @@ try {
       assert.equal(writes[0].uid, await page.evaluate(() => window.__fixture.A));
       const b = await page.evaluate(() => window.__fixture.B);
       assert.ok(snapshot.rows.some(r => r.owner_id === b));
+      assert.equal(snapshot.calls.filter(c => c.operation === "cleanup_deleted_session").length, 0);
     });
     for (const failure of ["delete_wrong_password", "delete_uncertain"]) {
       await scenario(`삭제 ${failure}는 완료로 표시하지 않고 비밀번호를 비운 뒤 재시도`, async () => {
@@ -100,6 +101,38 @@ try {
         await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).waitFor();
       });
     }
+
+    await scenario("삭제 후 로그인 정보 정리 실패는 화면에서 재시도할 수 있음", async () => {
+      await fresh("account");
+      await prepareDelete();
+      await page.getByRole("button", { name: "이 계정 삭제", exact: true }).click();
+      await page.getByText("계정과 이 계정의 기록·저장 동의를 삭제했어요.", { exact: false }).waitFor();
+      await page.evaluate(() => { window.__fixture.failure = "cleanup_failed"; });
+      await page.getByRole("button", { name: "로그인 화면으로 이동", exact: true }).click();
+      await page.getByText("이 기기의 로그인 정보를 정리하지 못했어요. 화면을 새로고침해 주세요.", { exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "로그인 화면으로 이동", exact: true }).isDisabled(), false);
+      const calls = await page.evaluate(() => window.__fixture.snapshot().calls);
+      const cleanups = calls.filter(c => c.operation === "cleanup_deleted_session");
+      assert.equal(cleanups.length, 1);
+      assert.equal(cleanups[0].uid, await page.evaluate(() => window.__fixture.A));
+    });
+
+    await scenario("실제 두 탭의 공유 쿠키에서 삭제한 A 정리는 새 B 세션을 보존", async () => {
+      await fresh("account");
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=account`);
+        await other.waitForFunction(() => !!window.__fixture?.writeSyntheticSession);
+        await page.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.A); });
+        await other.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.B); });
+        const result = await page.evaluate(() => window.__fixture.clearSyntheticSession(window.__fixture.A));
+        assert.equal(result, "changed");
+        assert.ok(await other.evaluate(() => document.cookie.includes("sb-synthetic-auth-token=")));
+        await other.evaluate(async () => { const f = window.__fixture; await f.writeSyntheticSession(f.A); });
+        assert.equal(await page.evaluate(() => window.__fixture.clearSyntheticSession(window.__fixture.A)), "cleared");
+        assert.equal(await other.evaluate(() => document.cookie.includes("sb-synthetic-auth-token=")), false);
+      } finally { await other.close(); }
+    });
 
     await scenario("늦은 A 동의 조회가 B를 다음 화면으로 보내지 않음", async () => {
       await fresh("consent");
