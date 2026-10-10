@@ -11,7 +11,7 @@ const session = (id: string): Session => ({
   user: { id, app_metadata: {}, user_metadata: {}, aud: "authenticated", created_at: "2026-01-01T00:00:00Z" },
 });
 
-function fixture() {
+function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; beforeRemove?: (values: Map<string, string>) => void } = {}) {
   const values = new Map([[key, JSON.stringify(session("A"))]]);
   let respond!: (response: Response) => void;
   let started!: () => void;
@@ -23,8 +23,8 @@ function fixture() {
     autoRefreshToken: false, detectSessionInUrl: false, persistSession: true,
     storage: {
       getItem: name => values.get(name) ?? null,
-      setItem: (name, value) => { values.set(name, value); },
-      removeItem: name => { values.delete(name); },
+      setItem: (name, value) => { if (name === key) hooks.beforeSet?.(values); values.set(name, value); },
+      removeItem: name => { if (name === key) hooks.beforeRemove?.(values); values.delete(name); },
     },
     fetch: async input => {
       assert.match(String(input), /^https:\/\/synthetic\.invalid\/auth\/v1\/token\?/);
@@ -100,5 +100,45 @@ test("guard still clears the original expired A when its own refresh is rejected
   assert.ok(result.error);
   assert.notEqual(result.error.name, "AuthRefreshDiscardedError");
   assert.equal(f.values.has(key), false);
+  assert.equal(events.includes("SIGNED_OUT"), true);
+});
+
+// Known unresolved reproductions: passing means the race was reproduced, NOT protection success.
+test("[unresolved reproduction] B replacement inside A refresh storage write is overwritten", async () => {
+  let armed = false;
+  const f = fixture({ beforeSet: values => {
+    if (armed) { armed = false; values.set(key, JSON.stringify(session("B"))); }
+  } });
+  enableTestRefreshGuard(f.auth);
+  const events: string[] = [];
+  f.auth.onAuthStateChange(event => { events.push(event); });
+  const pending = f.auth.refreshSession({ refresh_token: session("A").refresh_token });
+  await f.requestStarted;
+  armed = true;
+  f.respond(new Response(JSON.stringify(session("A")), { status: 200, headers: { "Content-Type": "application/json" } }));
+  const result = await pending;
+  assert.equal(armed, false, "storage write boundary must be reached");
+  assert.equal(result.error, null);
+  assert.equal(JSON.parse(f.values.get(key)!).user.id, "A", "reproduces undesirable overwrite, not protection");
+  assert.equal(events.includes("TOKEN_REFRESHED"), true);
+});
+
+test("[unresolved reproduction] B replacement inside rejected A refresh removal is erased", async () => {
+  let armed = false;
+  const f = fixture({ beforeRemove: values => {
+    if (armed) { armed = false; values.set(key, JSON.stringify(session("B"))); }
+  } });
+  enableTestRefreshGuard(f.auth);
+  const events: string[] = [];
+  f.auth.onAuthStateChange(event => { events.push(event); });
+  const pending = f.auth.refreshSession({ refresh_token: session("A").refresh_token });
+  await f.requestStarted;
+  f.values.set(key, JSON.stringify({ ...session("A"), expires_at: 1 }));
+  armed = true;
+  f.respond(new Response(JSON.stringify({ message: "Synthetic rejection" }), { status: 400, headers: { "Content-Type": "application/json" } }));
+  const result = await pending;
+  assert.equal(armed, false, "storage removal boundary must be reached");
+  assert.ok(result.error);
+  assert.equal(f.values.has(key), false, "reproduces undesirable removal, not protection");
   assert.equal(events.includes("SIGNED_OUT"), true);
 });
