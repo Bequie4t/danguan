@@ -36,6 +36,17 @@ export default function HelpPage() {
         </p>
       </div>
 
+      <section aria-labelledby="offline-help" className="space-y-2 rounded-2xl border border-line p-4">
+        <h2 id="offline-help" className="font-semibold">인터넷이 없을 때를 대비하기</h2>
+        <p className="text-sm text-muted">
+          연락처 안내 파일을 미리 저장하면 인터넷 없이 읽을 수 있어요. 저장하지 않은 도움 화면은 오프라인에서 열리지 않을 수 있어요.
+          전화 연결에는 통신망이 필요하고, 출처 링크는 인터넷이 필요해요.
+        </p>
+        <a href="/help/contact-card" download="danguan-help-contacts.txt" className="inline-flex min-h-12 items-center rounded-xl border border-line px-4 py-2 hover:bg-help-soft">
+          연락처 안내 파일 저장
+        </a>
+      </section>
+
       <ul className="space-y-3">
         {CONTACTS.map((c) => (
           <li key={c.number} className="rounded-2xl border border-line bg-surface p-4">
