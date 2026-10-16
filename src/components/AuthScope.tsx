@@ -168,7 +168,7 @@ export function useAuthScope(): Scope {
  *  - 응답이 오면 화면이 닫혔거나 계정이 바뀌었는지 확인한다.
  * 다른 계정·닫힌 화면의 결과는 무시한다. 같은 계정의 실패는 입력을 보존하고 다시 시도할 수 있다.
  */
-export function useScopedRequest() {
+export function useScopedAuthRequest() {
   const { guard, ticket } = useAuthScope();
   const { uid, generation } = ticket;
   const mounted = useRef(false);
@@ -180,19 +180,27 @@ export function useScopedRequest() {
   }, []);
 
   return useCallback(
-    async <T,>(send: (client: SupabaseClient) => Promise<T>): Promise<Guarded<T>> => {
+    async <T,>(send: (auth: SessionAuth) => Promise<T>): Promise<Guarded<T>> => {
       return guardedRequest({
         guard,
         ticket: { uid, generation },
         getSessionAuth: currentSessionAuth,
         isMounted: () => mounted.current,
-        send: (auth) => {
-          const client = pinnedClient(auth.accessToken);
-          if (!client) throw new Error("unconfigured");
-          return send(client);
-        },
+        send,
       });
     },
     [guard, uid, generation],
+  );
+}
+
+export function useScopedRequest() {
+  const run = useScopedAuthRequest();
+  return useCallback(
+    <T,>(send: (client: SupabaseClient) => Promise<T>): Promise<Guarded<T>> => run(async (auth) => {
+      const client = pinnedClient(auth.accessToken);
+      if (!client) throw new Error("unconfigured");
+      return send(client);
+    }),
+    [run],
   );
 }

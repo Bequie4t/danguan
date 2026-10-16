@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
+import { getBrowserClient, runBrowserAuthWrite, browserAuthTransactionMode } from "@/lib/supabase/client";
+
+import { authWriteFailureText } from "@/lib/account/authTransaction";
 
 type Mode = "signin" | "signup";
 
@@ -26,7 +28,7 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
     setMessage(null);
     try {
       if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { error } = await runBrowserAuthWrite(supabase, () => supabase.auth.signInWithPassword({ email, password }));
         if (error) {
           setMessage({
             tone: "warn",
@@ -40,11 +42,11 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
         window.location.replace(`/consent?next=${encodeURIComponent(next)}`);
       } else {
         const redirect = `${window.location.origin}/auth/callback?next=${encodeURIComponent(`/consent?next=${next}`)}`;
-        const { data, error } = await supabase.auth.signUp({
+        const { data, error } = await runBrowserAuthWrite(supabase, () => supabase.auth.signUp({
           email,
           password,
           options: { emailRedirectTo: redirect },
-        });
+        }));
         if (error) {
           setMessage({
             tone: "warn",
@@ -60,8 +62,8 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
           setMessage({ tone: "info", text: "가입 확인 메일을 보냈어요. 메일의 링크를 누르면 이어서 진행돼요." });
         }
       }
-    } catch {
-      setMessage({ tone: "warn", text: "연결이 불안정해요. 잠시 후 다시 시도해 주세요." });
+    } catch (error) {
+      setMessage({ tone: "warn", text: authWriteFailureText(error, browserAuthTransactionMode()) });
     } finally {
       setBusy(false);
     }

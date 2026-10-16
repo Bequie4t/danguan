@@ -25,3 +25,4 @@ for f in "$ROOT"/supabase/migrations/*.sql; do "${PSQL[@]}" -f "$f"; done
 echo "== 재적용 OK"
 
 "${PSQL[@]}" -f "$ROOT/supabase/local-test/10_rls_and_sync_tests.sql"
+"${PSQL[@]}" -f "$ROOT/supabase/local-test/20_account_deletion_tests.sql"
