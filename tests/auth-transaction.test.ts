@@ -48,3 +48,28 @@ test("wait timeout never steals the lock or runs queued work", async () => {
 test("missing Web Locks rejects without executing auth work", async () => {
   await assert.rejects(strictAuthLock("lock:synthetic", 10, async () => assert.fail("must not run"), null), /auth_transaction_lock_unavailable/);
 });
+
+test("TEST login distinguishes an actual lock wait timeout without exposing error details", async () => {
+  const { authWriteFailureText } = await import("../src/lib/account/authTransaction");
+  const locks=queuedLocks();
+  let release!:()=>void;
+  let started!:()=>void;
+  const began=new Promise<void>(resolve=>{started=resolve;});
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const holder=strictAuthLock("lock:synthetic-diagnostic",100,async()=>{started();await gate;},locks);
+  await began;
+  try {
+    await strictAuthLock("lock:synthetic-diagnostic",5,async()=>assert.fail("must not execute"),locks);
+    assert.fail("must time out");
+  } catch(error) {
+    assert.equal(authWriteFailureText(error,true),"다른 탭에서 로그인 상태를 처리하고 있어요. 그 작업이 끝나면 다시 로그인해 주세요.");
+    assert.equal(authWriteFailureText(error,false),"연결이 불안정해요. 잠시 후 다시 시도해 주세요.");
+  } finally {release();await holder;}
+});
+
+test("unknown errors and spoofed timeout properties keep generic text with no private error content", async()=>{
+  const {authWriteFailureText}=await import("../src/lib/account/authTransaction");
+  for(const error of [new Error("synthetic-private-secret"),{name:"AuthTransactionTimeout",isAcquireTimeout:true},null]) {
+    assert.equal(authWriteFailureText(error,true),"연결이 불안정해요. 잠시 후 다시 시도해 주세요.");
+  }
+});

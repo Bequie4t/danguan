@@ -38,3 +38,11 @@ export async function authWriteTransaction<T>(auth: InstanceType<typeof AuthClie
   if (initialized.error) throw new Error("auth_transaction_initialization_failed");
   return withAuthTransaction(base, work, locks);
 }
+
+// TEST diagnostics only: do not mislabel a known local lock timeout as a network failure.
+// All unrecognized errors stay generic; never display raw error messages or credential values.
+export function authWriteFailureText(error: unknown, testMode: boolean): string {
+  return testMode && error instanceof AuthTransactionTimeout
+    ? "다른 탭에서 로그인 상태를 처리하고 있어요. 그 작업이 끝나면 다시 로그인해 주세요."
+    : "연결이 불안정해요. 잠시 후 다시 시도해 주세요.";
+}

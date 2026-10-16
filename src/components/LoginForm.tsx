@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { getBrowserClient, runBrowserAuthWrite } from "@/lib/supabase/client";
+import { getBrowserClient, runBrowserAuthWrite, browserAuthTransactionMode } from "@/lib/supabase/client";
+
+import { authWriteFailureText } from "@/lib/account/authTransaction";
 
 type Mode = "signin" | "signup";
 
@@ -60,8 +62,8 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
           setMessage({ tone: "info", text: "가입 확인 메일을 보냈어요. 메일의 링크를 누르면 이어서 진행돼요." });
         }
       }
-    } catch {
-      setMessage({ tone: "warn", text: "연결이 불안정해요. 잠시 후 다시 시도해 주세요." });
+    } catch (error) {
+      setMessage({ tone: "warn", text: authWriteFailureText(error, browserAuthTransactionMode()) });
     } finally {
       setBusy(false);
     }

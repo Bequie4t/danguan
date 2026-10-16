@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "auth-test" ? "인증 갱신 시험" : screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "signin" ? "로그인" : screen === "auth-test" ? "인증 갱신 시험" : screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -118,6 +118,22 @@ try {
       await page.evaluate(() => window.__fixture.mount("records"));
       await page.getByText("가상 A 기록",{exact:true}).waitFor();
       assert.equal(await page.evaluate(async () => (await fetch("https://wxqmqksqjmfflzghozuq.supabase.co/auth/v1/token?grant_type=refresh_token",{method:"POST"})).status),200);
+    });
+
+    for (const [failure, mode, expected] of [
+      ["auth_lock_busy",true,"다른 탭에서 로그인 상태를 처리하고 있어요. 그 작업이 끝나면 다시 로그인해 주세요."],
+      ["auth_exception",true,"연결이 불안정해요. 잠시 후 다시 시도해 주세요."],
+      ["auth_lock_busy",false,"연결이 불안정해요. 잠시 후 다시 시도해 주세요."],
+    ]) await scenario(`로그인 실패 안내: ${failure}, TEST모드 ${mode}`, async () => {
+      await fresh("signin");
+      await page.evaluate(({failure,mode}) => {window.__fixture.failure=failure;window.__fixture.transactionMode=mode;},{failure,mode});
+      await page.getByLabel("이메일",{exact:true}).fill("synthetic@example.invalid");
+      await page.getByLabel("비밀번호",{exact:true}).fill("synthetic-password");
+      await page.getByRole("button",{name:"로그인",exact:true}).click();
+      await page.getByText(expected,{exact:true}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"로그인",exact:true}).isEnabled(),true);
+      assert.equal(await page.getByLabel("이메일",{exact:true}).inputValue(),"synthetic@example.invalid");
+      assert.equal(await page.getByText("synthetic-private-error",{exact:false}).count(),0);
     });
 
     const prepareDelete = async () => {

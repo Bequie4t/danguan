@@ -1,11 +1,12 @@
 // 브라우저 회귀 시험 전용. 실제 서비스에서 import하지 않는다.
 // 인증·DB를 메모리 모의 응답으로 대체하고 실제 React 컴포넌트와 훅을 렌더한다.
 import React from "react";
+import LoginForm from "../../src/components/LoginForm";
 import AuthTest from "../../src/app/test-auth/auth-test";
 import { createRoot } from "react-dom/client";
 import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
 import { enableTestRefreshGuard } from "../../src/lib/account/refreshGuard";
-import { authWriteTransaction, strictAuthLock, withAuthTransaction } from "../../src/lib/account/authTransaction";
+import { authWriteTransaction, strictAuthLock, withAuthTransaction, AuthTransactionTimeout } from "../../src/lib/account/authTransaction";
 import { TEST_DATABASE } from "../../src/lib/checkins/responseTest";
 import { completeBrowserCallback, readCallbackCookies } from "../../src/lib/account/callback";
 import { createBrowserClient, parseCookieHeader, serializeCookieHeader, stringToBase64URL, stringFromBase64URL } from "@supabase/ssr";
@@ -38,7 +39,7 @@ seed(B, "00000000000b", "가상 B 기록");
 const token = (uid) => `e30.${btoa(JSON.stringify({ sub: uid }))}.fake`;
 const subject = (jwt) => JSON.parse(atob(jwt.split(".")[1])).sub;
 export const fixture = {
-  A, B, uid: A, failure: null, staleRun: null,
+  A, B, uid: A, failure: null, staleRun: null, transactionMode: true,
   switchUser(uid) {
     this.uid = uid;
     const session = uid ? { user: { id: uid }, access_token: token(uid) } : null;
@@ -57,6 +58,7 @@ export const fixture = {
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
   setConsent(uid, granted) { consents.set(uid, granted); },
   mount(screen) {
+    if (screen === "signin") { root.render(<LoginForm next="/today" signedOut={false} linkError={false} />); return; }
     if (screen === "auth-test") { root.render(<AuthTest />); return; }
     if (screen === "callback") { root.render(<CallbackConfirmation />); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : screen === "account" ? <AccountDeletion enabled /> : <CheckinForm />}</React.Fragment></AuthScope>);
@@ -152,7 +154,12 @@ const browserClient = {
     },
   },
 };
-export function browserAuthTransactionMode() { return true; }
+export function browserAuthTransactionMode() { return fixture.transactionMode; }
+export async function runBrowserAuthWrite(_client, work) {
+  if (fixture.failure === "auth_lock_busy") throw new AuthTransactionTimeout();
+  if (fixture.failure === "auth_exception") throw new Error("synthetic-private-error");
+  return work();
+}
 export function getBrowserClient() { return browserClient; }
 export async function clearDeletedAccountSession(uid) {
   calls.push({ operation: "cleanup_deleted_session", uid });
