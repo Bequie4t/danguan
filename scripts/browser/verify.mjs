@@ -303,6 +303,8 @@ try {
       await page.waitForFunction(() => window.__fixture.started("grant_consent"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("grant_consent"); });
       await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
+      // The heading exists before and after the account switch; wait for the new form state.
+      await page.waitForFunction(() => document.querySelector("#consent-check")?.checked === false);
       assert.equal(await page.locator("#consent-check").isChecked(), false);
       assert.equal(new URL(page.url()).searchParams.get("screen"), "consent");
       const writes = (await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "grant_consent");
