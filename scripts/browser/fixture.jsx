@@ -1,6 +1,7 @@
 // 브라우저 회귀 시험 전용. 실제 서비스에서 import하지 않는다.
 // 인증·DB를 메모리 모의 응답으로 대체하고 실제 React 컴포넌트와 훅을 렌더한다.
 import React from "react";
+import AuthTest from "../../src/app/test-auth/auth-test";
 import { createRoot } from "react-dom/client";
 import { clearDeletedBrowserSession, withSessionCookieLock } from "../../src/lib/account/browserSession";
 import { enableTestRefreshGuard } from "../../src/lib/account/refreshGuard";
@@ -56,6 +57,7 @@ export const fixture = {
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
   setConsent(uid, granted) { consents.set(uid, granted); },
   mount(screen) {
+    if (screen === "auth-test") { root.render(<AuthTest />); return; }
     if (screen === "callback") { root.render(<CallbackConfirmation />); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : screen === "account" ? <AccountDeletion enabled /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
@@ -133,10 +135,16 @@ const browserClient = {
       const uid = subject(jwt);
       return { data: { user: { id: uid, email: uid === A ? "a@example.invalid" : "b@example.invalid" } }, error: null };
     },
+    async refreshSession() {
+      if (fixture.failure === "refresh_before_fetch") throw new Error("synthetic lock rejection");
+      calls.push({operation:"refresh_auth"});
+      const response = await window.fetch(TEST_DATABASE + "/auth/v1/token?grant_type=refresh_token", {method:"POST"});
+      return {error:response.ok ? null : {message:"synthetic rejection"}};
+    },
     async getSession() {
       if (fixture.failure === "session_error") throw new Error("fake session failure");
       const uid = fixture.uid;
-      return { data: { session: uid ? { user: { id: uid }, access_token: token(fixture.failure === "bad_token" ? B : uid) } : null }, error: null };
+      return { data: { session: uid ? { user: { id: uid }, access_token: token(fixture.failure === "bad_token" ? B : uid), refresh_token: "synthetic-refresh" } : null }, error: null };
     },
     onAuthStateChange(fn) {
       listeners.add(fn);
@@ -144,6 +152,7 @@ const browserClient = {
     },
   },
 };
+export function browserAuthTransactionMode() { return true; }
 export function getBrowserClient() { return browserClient; }
 export async function clearDeletedAccountSession(uid) {
   calls.push({ operation: "cleanup_deleted_session", uid });
@@ -293,6 +302,7 @@ window.fetch = async (url, options) => {
     if (fixture.failure === "callback_error") return new Response(JSON.stringify({ message: "Synthetic expired link" }), { status: 400, headers: { "Content-Type": "application/json" } });
     return new Response(JSON.stringify({ user: { id: A, aud: "authenticated", app_metadata: {}, user_metadata: {}, created_at: now }, access_token: token(A), refresh_token: "synthetic-callback-refresh", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
+  if (String(url) === TEST_DATABASE + "/auth/v1/token?grant_type=refresh_token") return new Response("{}", {status:fixture.failure === "refresh_rejected" ? 400 : 200});
   if (url !== "/api/account/delete") return originalFetch(url, options);
   // 보호된 Preview는 인증 쿠키가 빠진 요청을 앱 API에 전달하지 않는다.
   if (options.credentials !== "same-origin") return new Response(JSON.stringify({ error: { code: "401" } }), { status: 401 });

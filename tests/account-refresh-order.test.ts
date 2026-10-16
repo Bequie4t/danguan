@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AuthClient, type Session } from "@supabase/supabase-js";
 import { enableTestRefreshGuard } from "../src/lib/account/refreshGuard";
 import { authWriteTransaction, strictAuthLock } from "../src/lib/account/authTransaction";
+import { runRefreshTest } from "../src/lib/account/refreshTest";
 import { queuedLocks } from "./helpers/auth-locks";
 
 // 실제 네트워크·DB·토큰을 사용하지 않는 설치 SDK의 공개 API 회귀 시험.
@@ -20,6 +21,7 @@ function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; bef
   const requestStarted = new Promise<void>(resolve => { started = resolve; });
   const response = new Promise<Response>(resolve => { respond = resolve; });
   let requests = 0;
+  let lastOwner = "";
   const auth = new AuthClient({
     url: "https://synthetic.invalid/auth/v1", storageKey: key,
     autoRefreshToken: false, detectSessionInUrl: false, persistSession: true,
@@ -29,15 +31,17 @@ function fixture(hooks: { beforeSet?: (values: Map<string, string>) => void; bef
       setItem: (name, value) => { if (name === key) hooks.beforeSet?.(values); values.set(name, value); },
       removeItem: name => { if (name === key) hooks.beforeRemove?.(values); values.delete(name); },
     },
-    fetch: async input => {
+    fetch: async (input, init) => {
+      if (String(input).endsWith("/user")) return new Response(JSON.stringify(JSON.parse(values.get(key)!).user), {status:200, headers:{"Content-Type":"application/json"}});
       assert.match(String(input), /^https:\/\/synthetic\.invalid\/auth\/v1\/token\?/);
       requests += 1;
       if (hooks.passwordLogin && String(input).includes("grant_type=password")) return new Response(JSON.stringify(session("B")), { status: 200, headers: { "Content-Type": "application/json" } });
+      lastOwner = JSON.parse(String(init?.body)).refresh_token === session("A").refresh_token ? "A" : "B";
       started();
       return response;
     },
   });
-  return { auth, values, requestStarted, respond, requests: () => requests };
+  return { auth, values, requestStarted, respond, requests: () => requests, lastRefreshOwner:()=>lastOwner };
 }
 
 test("SDK discards successful A refresh arriving after storage switched to B", async () => {
@@ -182,3 +186,28 @@ for (const failure of [false, true]) {
     assert.equal(events.length, count, "old refresh must not notify after B commit");
   });
 }
+
+
+test("TEST refresh queued after B login uses current SDK session, never captured A token", async () => {
+  const locks=queuedLocks();
+  let block=false;
+  let began!:()=>void;
+  let release!:()=>void;
+  const started=new Promise<void>(resolve=>{began=resolve;});
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const f=fixture({lock:(name,timeout,work)=>strictAuthLock(name,timeout,async()=>{
+    if(block){block=false;began();await gate;} return work();
+  },locks)});
+  enableTestRefreshGuard(f.auth);
+  await f.auth.initialize();
+  let current=true;
+  const pending=runRefreshTest(f.auth,()=>current,"A",()=>{block=true;});
+  await started;
+  f.values.set(key,JSON.stringify(session("B"))); current=false; release();
+  await f.requestStarted;
+  // Server response follows the refresh token actually submitted by SDK.
+  f.respond(new Response(JSON.stringify(session(f.lastRefreshOwner())),{status:200,headers:{"Content-Type":"application/json"}}));
+  assert.equal(await pending,"changed");
+  assert.equal(f.lastRefreshOwner(),"B");
+  assert.equal(JSON.parse(f.values.get(key)!).user.id,"B");
+});

@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "auth-test" ? "인증 갱신 시험" : screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "account" ? "계정 삭제" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -60,6 +60,65 @@ try {
       passed++;
       console.log(`PASS ${viewport.width}px ${name}`);
     };
+
+    await scenario("갱신 시험 화면: 보류·중복 실행 차단·전달 완료", async () => {
+      await fresh("auth-test");
+      await page.getByRole("button", {name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"정상 갱신 실행",exact:true}).isDisabled(),true);
+      assert.equal((await page.evaluate(() => window.__fixture.snapshot())).calls.filter(c => c.operation === "refresh_auth").length,1);
+      await page.getByRole("button", {name:"갱신 응답 전달",exact:true}).click();
+      await page.getByText("갱신 요청이 성공했습니다.",{exact:true}).waitFor();
+    });
+    await scenario("갱신 시험 화면: 취소는 성공 시험으로 표시하지 않음", async () => {
+      await fresh("auth-test");
+      await page.getByRole("button", {name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).waitFor();
+      await page.getByRole("button", {name:"갱신 시험 취소",exact:true}).click();
+      await page.getByText("시험을 취소했거나 대기 한도를 넘겼습니다.",{exact:false}).waitFor();
+      assert.equal(await page.getByText("갱신 요청이 성공했습니다.",{exact:true}).count(),0);
+    });
+    await scenario("갱신 시험 화면: 이전 계정 완료를 새 계정 성공으로 표시하지 않음", async () => {
+      await fresh("auth-test");
+      await page.getByRole("button", {name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).waitFor();
+      await page.evaluate(() => window.__fixture.switchUser(window.__fixture.B));
+      await page.getByRole("button",{name:"갱신 응답 전달",exact:true}).click();
+      await page.getByText("계정이 바뀌어 이전 갱신 결과를 완료로 표시하지 않았습니다.",{exact:true}).waitFor();
+      assert.equal(await page.getByText("갱신 요청이 성공했습니다.",{exact:true}).count(),0);
+    });
+    await scenario("갱신 시험 화면: 거부 응답은 보류·완료로 표시하지 않음", async () => {
+      await fresh("auth-test");
+      await page.evaluate(() => { window.__fixture.failure = "refresh_rejected"; });
+      await page.getByRole("button",{name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신을 확인하지 못했습니다. 이 시험은 완료되지 않았습니다.",{exact:true}).waitFor();
+      assert.equal(await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).count(),0);
+    });
+    await scenario("갱신 시험 화면: 로그아웃 상태는 갱신 버튼을 숨김", async () => {
+      await fresh("auth-test");
+      await page.evaluate(() => window.__fixture.switchUser(null));
+      await page.getByText("로그인 화면으로 이동하는 중이에요…",{exact:true}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"정상 갱신 실행",exact:true}).count(),0);
+    });
+
+    await scenario("갱신 시험 화면: 요청 전 SDK 실패 후 다음 갱신을 보류하지 않음", async () => {
+      await fresh("auth-test");
+      await page.evaluate(() => { window.__fixture.failure = "refresh_before_fetch"; });
+      await page.getByRole("button",{name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신을 확인하지 못했습니다. 이 시험은 완료되지 않았습니다.",{exact:true}).waitFor();
+      await page.evaluate(() => { window.__fixture.failure = null; });
+      await page.getByRole("button",{name:"정상 갱신 실행",exact:true}).press("Enter");
+      await page.getByText("갱신 요청이 성공했습니다.",{exact:true}).waitFor();
+      assert.equal(await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).count(),0);
+    });
+    await scenario("갱신 시험 화면: 종료 시 보류 해제와 fetch 복구", async () => {
+      await fresh("auth-test");
+      await page.getByRole("button",{name:"갱신 성공 응답 보류 실행",exact:true}).click();
+      await page.getByText("갱신 성공 응답을 보류했습니다.",{exact:false}).waitFor();
+      await page.evaluate(() => window.__fixture.mount("records"));
+      await page.getByText("가상 A 기록",{exact:true}).waitFor();
+      assert.equal(await page.evaluate(async () => (await fetch("https://wxqmqksqjmfflzghozuq.supabase.co/auth/v1/token?grant_type=refresh_token",{method:"POST"})).status),200);
+    });
 
     const prepareDelete = async () => {
       await page.getByText("a@example.invalid", { exact: true }).waitFor();

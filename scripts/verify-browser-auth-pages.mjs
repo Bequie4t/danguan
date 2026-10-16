@@ -13,7 +13,7 @@ const cases = browserMode ? [["preview", "https://wxqmqksqjmfflzghozuq.supabase.
 for (const [environment, database, flag, enabled] of cases) {
   const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-p", "3197", "-H", "127.0.0.1"], {
     stdio: "ignore",
-    env: { ...process.env, VERCEL_ENV: environment, NEXT_PUBLIC_SUPABASE_URL: database, NEXT_PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key", TEST_BROWSER_AUTH_PREVIEW_ENABLED: flag },
+    env: { ...process.env, VERCEL_ENV: environment, NEXT_PUBLIC_SUPABASE_URL: database, NEXT_PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key", TEST_BROWSER_AUTH_PREVIEW_ENABLED: flag, NEXT_PUBLIC_TEST_AUTH_TRANSACTION_LOCK_ENABLED: "true" },
   });
   let browser;
   try {
@@ -33,6 +33,10 @@ for (const [environment, database, flag, enabled] of cases) {
         assert.match(await response.text(), /로그인 상태를 확인하는 중/);
       } else assert.match(response.headers.get("location"), /\/login\?next=/);
     }
+    const authTest = await fetch(origin + "/test-auth", {redirect:"manual"});
+    assert.equal(authTest.status, enabled ? 200 : 404);
+    assert.equal(authTest.headers.get("set-cookie"),null);
+    if (authTest.status === 200) assert.match(authTest.headers.get("cache-control"), /no-store/);
     if (enabled) {
       const callback = await fetch(origin + "/auth/callback?code=synthetic-code&next=https%3A%2F%2Foutside.invalid", { redirect: "manual" });
       assert.equal(callback.status, 307);
