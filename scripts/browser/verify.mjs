@@ -317,6 +317,42 @@ try {
       assert.equal(snap.rows.filter((r) => r.id === sends[0].id).length, 1);
     });
 
+    await scenario("홈: 응답 유실 → 다른 탭에서 메모·태그 추가 → 같은 값 재시도해도 덮어쓰지 않음", async () => {
+      await fresh("home");
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "버거워요", exact: true }).click();
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), true, "확인 전에는 다른 값을 고를 수 없음");
+      const id = (await page.evaluate(() => window.__fixture.snapshot())).calls.find((c) => c.operation === "create_checkin").id;
+      await page.evaluate((id) => window.__fixture.editElsewhere(id, { note: "가상 다른 탭 메모", tags: ["sleep", "meal"] }), id);
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await page.getByText("이미 남겨진 기록이에요", { exact: false }).waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      const rec = snap.rows.find((r) => r.id === id);
+      assert.equal(rec.note, "가상 다른 탭 메모");
+      assert.deepEqual(rec.tags, ["sleep", "meal"]);
+      assert.equal(rec.version, 2);
+      assert.equal(snap.calls.filter((c) => c.operation === "update_checkin").length, 0, "홈은 수정 요청을 보내지 않음");
+      assert.equal(snap.calls.filter((c) => c.operation === "create_checkin" && c.id === id).length, 2);
+      assert.equal(await page.getByRole("button", { name: "되돌리기", exact: true }).count(), 0, "다른 곳에서 고친 기록은 되돌리기 대상 아님");
+      assert.equal(await page.getByRole("link", { name: "내 기록에서 확인", exact: true }).getAttribute("href"), "/records");
+      assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), false, "확인 뒤에는 다시 고를 수 있음");
+    });
+
+    await scenario("홈: 재시도로 옛 기록을 확인해도 울이는 경험 시점이 가장 늦은 기록을 따름", async () => {
+      await fresh("home");
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "많이 버거워요", exact: true }).click();
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      const later = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      await page.evaluate((t) => { const f = window.__fixture; f.addRecord(f.A, "0000000000c1", "okay", t); }, later);
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await homeSaved().waitFor();
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("가볍게"));
+      assert.equal((await uliLabel()).includes("녹듯"), false, "방금 확인한 옛 기록으로 울이를 바꾸지 않음");
+    });
+
     await scenario("홈: 늦은 A 저장 응답을 B 홈에 반영하지 않음", async () => {
       await fresh("home");
       await page.evaluate(() => window.__fixture.hold("create_checkin"));

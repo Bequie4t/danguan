@@ -1,21 +1,30 @@
 "use client";
 
 // 홈에서 바로 기록하기 (2단계).
-//  - 버거움을 한 번 누르면 저장한다. 저장 규칙은 오늘 기록 화면과 같은 saveFlow.ts를 쓴다.
+//  - 버거움을 한 번 누르면 새 기록을 만든다. 저장 규칙은 quickSave.ts: 만들거나 확인만 하고, 고치지 않는다.
 //  - 서버가 저장된 기록을 돌려주기 전에는 '남겨 뒀어요'를 보이지 않는다. 실패하면 고른 값과 기록 ID를 그대로 둔다.
-//  - 울이는 서버에서 확인한 내 가장 최근 기록 하나를 따른다. 평균·대표값을 만들지 않는다.
+//  - 응답이 사라진 뒤에는 처음 값 그대로 저장 여부만 확인한다. 그사이 다른 곳에서 고친 내용은 덮어쓰지 않는다.
+//  - 울이는 서버에서 확인한 내 기록 중 경험 시점이 가장 늦은 하나를 따른다. 평균·대표값을 만들지 않는다.
 //  - 로그인 전에는 저장하지 않고 로그인 안내만 보인다. 로그아웃하면 이 화면 상태는 통째로 사라진다(AuthScope).
-//  - 방금 남긴 기록은 "되돌리기"로 지울 수 있다. 버전이 같을 때만 지우고, 다른 기기에서 먼저 바뀌었으면 지우지 않는다.
+//  - 방금 남긴 기록은 "되돌리기"로 지울 수 있다. 다른 곳에서 고치지 않은 기록(version 1, 보낸 값 그대로)만 대상이고,
+//    지울 때도 버전을 검사한다.
 //  - 기록 내용을 console·로그로 보내지 않는다.
 
 import Link from "next/link";
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/client";
 import { getStorageConsent, type ConsentState } from "@/lib/consent";
-import { BURDEN_OPTIONS, burdenLabel, currentTimeZone, formatOccurred, newDraft, type Burden } from "@/lib/checkins/model";
-import { FAIL_TEXT, deleteCheckin, listCheckins, type RecordsClient } from "@/lib/checkins/api";
-import { formReducer, initialFormState } from "@/lib/checkins/formState";
-import { saveDraft, type PendingSave } from "@/lib/checkins/saveFlow";
+import {
+  BURDEN_OPTIONS,
+  burdenLabel,
+  currentTimeZone,
+  formatOccurred,
+  type Burden,
+  type Checkin,
+  type CreateCheckinParams,
+} from "@/lib/checkins/model";
+import { FAIL_TEXT, deleteCheckin, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { quickSave } from "@/lib/checkins/quickSave";
 import { ownedBy } from "@/lib/session/guard";
 import { latestOwnBurden, uliStateFor } from "@/lib/uli";
 import AuthScope, { useAuthScope, useScopedRequest } from "./AuthScope";
@@ -68,18 +77,32 @@ function Checking() {
   );
 }
 
+type Saved = { record: Checkin; untouched: boolean };
+
 function QuickCheckin() {
   const { uid, guard } = useAuthScope();
   const run = useScopedRequest();
   const [consent, setConsent] = useState<ConsentState | "loading">("loading");
-  // 울이가 따르는 값: 서버에서 확인한 내 가장 최근 기록의 버거움
+  // 울이가 따르는 값: 서버에서 확인한 내 기록 중 경험 시점이 가장 늦은 기록의 버거움
   const [shown, setShown] = useState<Burden | null>(null);
-  const [state, dispatch] = useReducer(formReducer, undefined, () => initialFormState(newDraft(makeId)));
-  const pending = useRef<{ uid: string; save: PendingSave } | null>(null);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [failReason, setFailReason] = useState<FailReason | null>(null);
+  const [picked, setPicked] = useState<Burden | null>(null);
+  const [saved, setSaved] = useState<Saved | null>(null);
+  // 새 기록 ID. 저장이 확인될 때까지 바뀌지 않는다 (재전송해도 중복 없음).
+  const draftId = useRef(makeId());
+  // 결과를 모르는 저장 요청. 다음 시도는 이 값 그대로 다시 보내 확인만 한다 (quickSave.ts 규칙).
+  const pending = useRef<{ uid: string; params: CreateCheckinParams } | null>(null);
+  const [hasPending, setHasPending] = useState(false);
   // 방금 남긴 기록 되돌리기 상태 (어떤 기록에 대한 것인지 id로 묶는다)
   const [undo, setUndo] = useState<{ id: string; status: "working" | "done" | "failed" | "conflict" } | null>(null);
   // 가장 최근에 시작한 울이 조회만 반영한다
   const latestLoad = useRef(0);
+
+  function setPending(params: CreateCheckinParams | null) {
+    pending.current = params ? { uid, params } : null;
+    setHasPending(params !== null);
+  }
 
   const loadLatest = useCallback(() => {
     const mineLoad = ++latestLoad.current;
@@ -102,9 +125,53 @@ function QuickCheckin() {
     loadLatest();
   }, [run, guard, loadLatest]);
 
+  async function save(b: Burden) {
+    if (status === "saving" || undo?.status === "working") return;
+    const prev = pending.current && pending.current.uid === uid ? pending.current.params : null;
+    // 결과를 모르는 요청이 있으면 그 값만 다시 확인한다. 다른 값을 섞지 않는다.
+    const value = prev ? prev.p_burden : b;
+    setUndo(null);
+    setPicked(value);
+    setFailReason(null);
+    setStatus("saving");
+    const draft = { id: draftId.current, burden: value, tags: [], note: "", recallLocal: null };
+    const r = await run((client) => quickSave(client as unknown as RecordsClient, draft, prev, new Date(), currentTimeZone()));
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setFailReason("unknown");
+      setStatus("failed");
+      return;
+    }
+    const res = r.value;
+    if (res.kind === "saved") {
+      if (!ownedBy(res.record, r.ticket)) {
+        setFailReason("unknown");
+        setStatus("failed");
+        return;
+      }
+      setPending(null);
+      draftId.current = makeId();
+      setSaved({ record: res.record, untouched: res.untouched });
+      setStatus("saved");
+      // 울이는 방금 확인한 기록이 아니라, 내 기록 중 경험 시점이 가장 늦은 기록을 다시 확인해 따른다.
+      loadLatest();
+      return;
+    }
+    if (res.kind === "invalid") {
+      setFailReason("invalid");
+      setStatus("failed");
+      return;
+    }
+    setPending(res.pending);
+    if (res.newIdRequired) draftId.current = makeId();
+    setFailReason(res.reason);
+    setStatus("failed");
+    if (res.reason === "no_consent") setConsent("missing");
+  }
+
   async function undoLast() {
-    const rec = state.lastSaved;
-    if (!rec || state.status !== "saved" || undo?.status === "working") return;
+    if (!saved || !saved.untouched || status !== "saved" || undo?.status === "working") return;
+    const rec = saved.record;
     const id = rec.id;
     setUndo({ id, status: "working" });
     // 저장할 때 받은 version으로만 지운다. 그사이 다른 기기에서 바뀌었으면 지우지 않는다.
@@ -117,54 +184,12 @@ function QuickCheckin() {
     const res = r.value;
     if (res.kind === "deleted" || res.kind === "not_found") {
       // not_found: 앞선 되돌리기 요청이 이미 지웠는데 응답만 사라진 경우 등. 내 기록이 남아 있지 않다.
-      latestLoad.current += 1; // 진행 중이던 옛 조회 결과를 버린다
-      setShown(null);
       setUndo({ id, status: "done" });
       loadLatest();
     } else if (res.kind === "conflict") {
       setUndo({ id, status: ownedBy(res.server, r.ticket) ? "conflict" : "failed" });
     } else {
       setUndo({ id, status: "failed" });
-    }
-  }
-
-  async function save(b: Burden) {
-    if (state.status === "saving" || undo?.status === "working") return;
-    setUndo(null);
-    const draft = { ...state.draft, burden: b };
-    dispatch({ type: "setBurden", burden: b });
-    const prev = pending.current && pending.current.uid === uid ? pending.current.save : null;
-    dispatch({ type: "submitStart" });
-    const r = await run((client) =>
-      saveDraft(client as unknown as RecordsClient, draft, prev, new Date(), currentTimeZone()),
-    );
-    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
-    if (!r.ok) {
-      dispatch({ type: "submitFail", reason: "unknown" });
-      return;
-    }
-    const res = r.value;
-    if (res.kind === "saved") {
-      if (!ownedBy(res.record, r.ticket)) {
-        dispatch({ type: "submitFail", reason: "unknown" });
-        return;
-      }
-      pending.current = null;
-      dispatch({ type: "submitSuccess", record: res.record, nextId: makeId() });
-      latestLoad.current += 1; // 저장 전에 시작한 조회가 늦게 와서 울이를 되돌리지 않게
-      setShown(res.record.burden);
-      return;
-    }
-    pending.current = res.pending ? { uid, save: res.pending } : null;
-    if (res.kind === "invalid") {
-      dispatch({ type: "submitFail", reason: "invalid" });
-    } else if (res.kind === "conflict") {
-      // 홈에서는 새 기록만 만든다. 충돌이 나면 오늘 기록 화면에서 고르게 안내한다.
-      dispatch({ type: "submitFail", reason: "unknown" });
-    } else {
-      dispatch({ type: "submitFail", reason: res.reason });
-      if (res.newIdRequired) dispatch({ type: "newId", id: makeId() });
-      if (res.reason === "no_consent") setConsent("missing");
     }
   }
 
@@ -182,11 +207,15 @@ function QuickCheckin() {
     );
   }
 
-  const saving = state.status === "saving";
-  const failed = state.status === "failed";
-  const picked = state.draft.burden;
+  const saving = status === "saving";
+  const failed = status === "failed";
   const undoing = undo?.status === "working";
-  const undoFor = state.lastSaved && undo?.id === state.lastSaved.id ? undo.status : null;
+  const undoFor = saved && undo?.id === saved.record.id ? undo.status : null;
+  const recordsLink = (
+    <Link href="/records" className="text-accent underline underline-offset-4">
+      내 기록에서 확인
+    </Link>
+  );
 
   return (
     <Stage burden={shown}>
@@ -196,7 +225,7 @@ function QuickCheckin() {
         </h1>
         <span className="shrink-0 text-xs text-muted">누르면 저장</span>
       </div>
-      <fieldset disabled={saving || undoing || consent === "loading"} aria-busy={saving || undoing}>
+      <fieldset disabled={saving || undoing || hasPending || consent === "loading"} aria-busy={saving || undoing}>
         <legend className="sr-only">버거운 정도</legend>
         <div className="flex flex-wrap gap-2">
           {BURDEN_OPTIONS.map((o) => {
@@ -221,16 +250,11 @@ function QuickCheckin() {
       {/* 저장 상태: 서버 확인 전에는 완료로 보이지 않는다 */}
       <div aria-live="polite" className="text-sm">
         {saving && <p>남기는 중이에요. 아직 완료되지 않았어요.</p>}
-        {state.status === "saved" && state.lastSaved && undoFor === "done" && (
-          <p>되돌렸어요. 방금 남긴 기록을 지웠어요.</p>
-        )}
-        {state.status === "saved" && state.lastSaved && undoFor !== "done" && (
+        {status === "saved" && saved && undoFor === "done" && <p>되돌렸어요. 방금 남긴 기록을 지웠어요.</p>}
+        {status === "saved" && saved && undoFor !== "done" && saved.untouched && (
           <div className="space-y-2">
             <p>
-              남겨 뒀어요 · {burdenLabel(state.lastSaved.burden)} · {formatOccurred(state.lastSaved)} ·{" "}
-              <Link href="/records" className="text-accent underline underline-offset-4">
-                더 남기기
-              </Link>
+              남겨 뒀어요 · {burdenLabel(saved.record.burden)} · {formatOccurred(saved.record)} · {recordsLink}
             </p>
             {undoFor !== "conflict" && (
               <button
@@ -249,23 +273,25 @@ function QuickCheckin() {
             )}
             {undoFor === "conflict" && (
               <p role="alert" className="rounded bg-warn-soft p-3 text-warn">
-                이 기록이 다른 기기에서 먼저 바뀌어서 지우지 않았어요.{" "}
-                <Link href="/records" className="underline underline-offset-4">
-                  내 기록
-                </Link>
-                에서 확인해 주세요.
+                이 기록이 다른 기기에서 먼저 바뀌어서 지우지 않았어요. {recordsLink}해 주세요.
               </p>
             )}
           </div>
         )}
-        {failed && state.failReason && (
+        {status === "saved" && saved && !saved.untouched && (
+          <p>
+            이미 남겨진 기록이에요 · {burdenLabel(saved.record.burden)}. 다른 곳에서 고친 내용은 그대로 두었어요. {recordsLink}해 주세요.
+          </p>
+        )}
+        {failed && failReason && (
           <div role="alert" className="space-y-2 rounded bg-warn-soft p-3 text-warn">
-            <p>{FAIL_TEXT[state.failReason]}</p>
-            {state.failReason === "signed_out" ? (
+            <p>{FAIL_TEXT[failReason]}</p>
+            {hasPending && <p>저장됐는지 확인할 때까지 다른 값은 고를 수 없어요. 처음 고른 값 그대로 확인해요.</p>}
+            {failReason === "signed_out" ? (
               <a href="/login?next=/" className="inline-block rounded-full border border-current px-4 py-2 font-semibold">
                 다시 로그인하기
               </a>
-            ) : state.failReason !== "no_consent" && picked ? (
+            ) : failReason !== "no_consent" && picked ? (
               <button
                 type="button"
                 onClick={() => void save(picked)}

@@ -50,6 +50,18 @@ export const fixture = {
   setConsent(uid, granted) { consents.set(uid, granted); },
   /** 다른 기기에서 먼저 고친 것처럼 version만 올린다 (시험 전용) */
   touch(id) { const r = rows.get(id); if (r) rows.set(id, { ...r, version: r.version + 1 }); },
+  /** 다른 탭에서 메모·생활 항목을 더한 것처럼 고친다 (version 증가, 시험 전용) */
+  editElsewhere(id, patch) { const r = rows.get(id); if (r) rows.set(id, { ...r, ...patch, version: r.version + 1 }); },
+  /** 다른 곳에서 남긴 가상 기록을 더한다 (경험 시점 지정) */
+  addRecord(uid, suffix, burden, occurredAt) {
+    const id = `00000000-0000-4000-9000-${suffix}`;
+    rows.set(id, {
+      id, owner_id: uid, occurred_at: occurredAt, occurred_tz: "Asia/Seoul",
+      recorded_at: occurredAt, recorded_tz: "Asia/Seoul", source: "direct",
+      burden, tags: [], note: null, created_at: now, updated_at: now, version: 1,
+    });
+    return id;
+  },
   mount(screen) {
     // 홈은 자체 AuthScope(로그아웃해도 이동하지 않음)를 가진다.
     if (screen === "home") { root.render(<React.Fragment key={++screenGeneration}><HomeCheckin /></React.Fragment>); return; }
