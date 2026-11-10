@@ -74,7 +74,7 @@ export default function ConsentForm({ next }: { next: string }) {
         </ul>
         <h2 className="pt-2 font-semibold">저장하는 곳과 볼 수 있는 사람</h2>
         <ul className="list-disc space-y-1 pl-5">
-          <li>당우안 계정 서버(Supabase)에 저장돼요. 이 계정으로 로그인한 나만 볼 수 있어요.</li>
+          <li>404 blue 계정 서버(Supabase)에 저장돼요. 이 계정으로 로그인한 나만 볼 수 있어요.</li>
           <li>기록 내용을 광고·분석 도구나 외부 AI로 보내지 않아요.</li>
           <li>기록은 언제든 &lsquo;내 기록&rsquo;에서 지울 수 있어요.</li>
         </ul>

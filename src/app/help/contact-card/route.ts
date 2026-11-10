@@ -4,7 +4,7 @@ export const dynamic = "force-static";
 
 export function GET() {
   const text = [
-    "당우안 · 도움 연락처",
+    "404 blue · 도움 연락처",
     `안내 확인 날짜: ${HELP_CHECKED_ON}`,
     "이 파일을 미리 저장하면 인터넷 없이 읽을 수 있어요.",
     "전화 연결에는 통신망이 필요하고, 출처 링크는 인터넷이 필요해요.",
