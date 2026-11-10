@@ -46,7 +46,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message));
     const fresh = async (screen = "form") => {
       await page.goto(`${base}/?screen=${screen}`);
-      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : "내 기록", exact: true }).waitFor();
+      await page.getByRole("heading", { name: screen === "form" ? "지금 어느 정도 버거운가요?" : screen === "consent" ? "기록을 계정에 저장하기 전에" : screen === "home" ? "지금 얼마나 버거워요?" : "내 기록", exact: true }).waitFor();
       if (screen === "records") await page.getByText("가상 A 기록", { exact: true }).waitFor();
     };
     const prepare = async (note) => {
@@ -212,6 +212,82 @@ try {
       await page.getByRole("heading", { name: "내 기록", exact: true }).waitFor();
       await page.evaluate(() => window.__fixture.release("create_checkin"));
       assert.equal(await page.getByText("저장했어요.", { exact: true }).count(), 0);
+    });
+
+    const uliLabel = () => page.locator('svg[role="img"]').first().getAttribute("aria-label");
+    const homeSaved = () => page.getByText("남겨 뒀어요", { exact: false });
+
+    await scenario("홈: 울이가 내 최근 기록을 따르고, 한 번 누르면 서버 확인 뒤 저장 표시", async () => {
+      await fresh("home");
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      const before = (await page.evaluate(() => window.__fixture.snapshot())).rows.length;
+      await page.evaluate(() => window.__fixture.hold("create_checkin"));
+      await page.getByRole("button", { name: "많이 버거워요", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("create_checkin"));
+      assert.equal(await homeSaved().count(), 0, "서버 확인 전에는 저장 표시 없음");
+      assert.ok((await uliLabel()).includes("무겁게"), "서버 확인 전에는 울이가 바뀌지 않음");
+      await page.evaluate(() => window.__fixture.release("create_checkin"));
+      await homeSaved().waitFor();
+      assert.ok((await uliLabel()).includes("녹듯"));
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.rows.length, before + 1);
+      const mine = snap.rows.filter((r) => r.burden === "very_heavy");
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0].owner_id, await page.evaluate(() => window.__fixture.A));
+      assert.equal(mine[0].note, null);
+      assert.deepEqual(mine[0].tags, []);
+    });
+
+    await scenario("홈: 응답 유실 뒤 같은 ID로 다시 남겨도 기록은 하나", async () => {
+      await fresh("home");
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "견딜 만해요", exact: true }).click();
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      assert.equal(await homeSaved().count(), 0);
+      assert.equal(await page.getByRole("button", { name: "견딜 만해요", exact: true }).getAttribute("aria-pressed"), "true");
+      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await homeSaved().waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      const sends = snap.calls.filter((c) => c.operation === "create_checkin");
+      assert.equal(sends.length, 2); assert.equal(sends[0].id, sends[1].id);
+      assert.equal(snap.rows.filter((r) => r.id === sends[0].id).length, 1);
+    });
+
+    await scenario("홈: 늦은 A 저장 응답을 B 홈에 반영하지 않음", async () => {
+      await fresh("home");
+      await page.evaluate(() => window.__fixture.hold("create_checkin"));
+      await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("create_checkin"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("create_checkin"); });
+      await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).waitFor();
+      await page.waitForTimeout(200);
+      assert.equal(await homeSaved().count(), 0);
+      assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).getAttribute("aria-pressed"), "false");
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      const sent = snap.rows.filter((r) => r.burden === "okay");
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].owner_id, await page.evaluate(() => window.__fixture.A));
+      await page.evaluate(() => window.__fixture.switchUser(window.__fixture.A));
+    });
+
+    await scenario("홈: 로그아웃하면 저장 화면이 사라지고 로그인 안내만 보임", async () => {
+      await fresh("home");
+      await page.getByRole("button", { name: "버거워요", exact: true }).waitFor();
+      await page.evaluate(() => window.__fixture.switchUser(null));
+      await page.getByRole("link", { name: "로그인하고 남기기", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "버거워요", exact: true }).count(), 0);
+      assert.ok((await uliLabel()).includes("조용히"), "로그아웃 상태에서는 이전 계정 기록을 따르지 않음");
+      assert.equal(new URL(page.url()).pathname, "/");
+      await page.evaluate(() => window.__fixture.switchUser(window.__fixture.A));
+    });
+
+    await scenario("홈: 동의 전에는 저장 요청 없이 동의 안내", async () => {
+      await fresh("home");
+      await page.evaluate(() => { const f = window.__fixture; f.setConsent(f.A, false); f.mount("home"); });
+      await page.getByRole("link", { name: "동의 내용 보기", exact: true }).waitFor();
+      const creates = (await page.evaluate(() => window.__fixture.snapshot())).calls.filter((c) => c.operation === "create_checkin");
+      assert.equal(creates.length, 0);
+      await page.evaluate(() => window.__fixture.setConsent(window.__fixture.A, true));
     });
 
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {

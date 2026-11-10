@@ -1,20 +1,11 @@
 import Link from "next/link";
-import Uli from "@/components/Uli";
+import HomeCheckin from "@/components/HomeCheckin";
 
-// 1단계(디자인 기초): 새 색·글꼴·울이를 입힌 홈. 홈에서 바로 기록하기는 2단계에서 붙인다.
+// 홈: 위쪽에서 버거움을 한 번 눌러 바로 남긴다(HomeCheckin). 아래는 다른 화면으로 가는 길.
 export default function Home() {
   return (
     <div className="space-y-8">
-      <section className="flex items-center gap-4 rounded bg-tint-sky p-5">
-        <div className="shrink-0">
-          <Uli state="rest" size={112} decorative />
-        </div>
-        <div className="space-y-1">
-          <p className="eyebrow">TODAY</p>
-          <h1 className="text-2xl font-bold">지금 필요한 것부터 시작하세요.</h1>
-          <p className="text-muted">매일 쓰지 않아도 괜찮아요. 남기고 싶을 때 한 번만 고르면 돼요.</p>
-        </div>
-      </section>
+      <HomeCheckin />
 
       <section aria-labelledby="daily" className="space-y-3">
         <div className="flex items-center gap-3">
@@ -23,8 +14,8 @@ export default function Home() {
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <Link href="/today" className="rounded border border-line bg-surface p-5 hover:border-accent">
-            <p className="text-lg font-semibold">오늘 기록</p>
-            <p className="mt-1 text-muted">지금 버거운 정도를 한 번 고르면 저장돼요.</p>
+            <p className="text-lg font-semibold">자세히 기록하기</p>
+            <p className="mt-1 text-muted">생활 항목·메모·지난 일 돌아보기를 함께 남겨요.</p>
           </Link>
           <Link href="/records" className="rounded border border-line bg-surface p-5 hover:border-accent">
             <p className="text-lg font-semibold">내 기록</p>

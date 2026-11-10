@@ -27,3 +27,23 @@ export const ULI_LABEL: Record<UliState, string> = {
   unsure: "고개를 갸웃하는 고양이 유령 울이",
   rest: "조용히 떠 있는 고양이 유령 울이",
 };
+
+/**
+ * 내 기록 중 경험한 시점(occurred_at)이 가장 늦은 기록 하나의 버거움.
+ * 다른 사람의 기록은 무시한다. 여러 기록을 섞거나 평균 내지 않는다. 없으면 null.
+ */
+export function latestOwnBurden(
+  records: ReadonlyArray<{ owner_id: string; occurred_at: string; recorded_at: string; burden: Burden }>,
+  ownerId: string,
+): Burden | null {
+  let best: { t: number; r: number; burden: Burden } | null = null;
+  for (const rec of records) {
+    if (rec.owner_id !== ownerId) continue;
+    const t = Date.parse(rec.occurred_at);
+    const r = Date.parse(rec.recorded_at);
+    if (Number.isNaN(t)) continue;
+    const rr = Number.isNaN(r) ? 0 : r;
+    if (!best || t > best.t || (t === best.t && rr > best.r)) best = { t, r: rr, burden: rec.burden };
+  }
+  return best ? best.burden : null;
+}
