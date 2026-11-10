@@ -238,6 +238,70 @@ try {
       assert.deepEqual(mine[0].tags, []);
     });
 
+    const homeSave = async (label) => {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      await homeSaved().waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      return snap.calls.filter((c) => c.operation === "create_checkin").at(-1).id;
+    };
+
+    await scenario("홈 되돌리기: 방금 남긴 기록만 지우고 울이는 남은 최근 기록으로", async () => {
+      await fresh("home");
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      const id = await homeSave("괜찮은 편이에요");
+      assert.ok((await uliLabel()).includes("가볍게"));
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.getByText("되돌렸어요. 방금 남긴 기록을 지웠어요.", { exact: true }).waitFor();
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.rows.some((r) => r.id === id), false);
+      assert.equal(snap.rows.length, 2, "가상 A·B 기존 기록은 그대로");
+      const del = snap.calls.filter((c) => c.operation === "delete_checkin");
+      assert.equal(del.length, 1); assert.equal(del[0].id, id);
+    });
+
+    await scenario("홈 되돌리기: 응답이 사라져도 다시 누르면 확인 후 완료, 다른 기록 무사", async () => {
+      await fresh("home");
+      const id = await homeSave("버거워요");
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.getByText("되돌리지 못했어요.", { exact: false }).waitFor();
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.getByText("되돌렸어요. 방금 남긴 기록을 지웠어요.", { exact: true }).waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.rows.some((r) => r.id === id), false);
+      assert.equal(snap.rows.length, 2);
+    });
+
+    await scenario("홈 되돌리기: 다른 기기에서 먼저 바뀐 기록은 지우지 않음", async () => {
+      await fresh("home");
+      const id = await homeSave("모르겠어요");
+      await page.evaluate((id) => window.__fixture.touch(id), id);
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.getByText("다른 기기에서 먼저 바뀌어서 지우지 않았어요", { exact: false }).waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.rows.some((r) => r.id === id), true);
+      assert.equal(await page.getByRole("button", { name: "되돌리기", exact: true }).count(), 0);
+    });
+
+    await scenario("홈 되돌리기: 늦은 A 응답이 B 홈에 반영되지 않고 B 기록은 그대로", async () => {
+      await fresh("home");
+      await homeSave("견딜 만해요");
+      await page.evaluate(() => window.__fixture.hold("delete_checkin"));
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.waitForFunction(() => window.__fixture.started("delete_checkin"));
+      await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("delete_checkin"); });
+      await page.getByRole("button", { name: "견딜 만해요", exact: true }).waitFor();
+      await page.waitForTimeout(200);
+      assert.equal(await page.getByText("되돌렸어요", { exact: false }).count(), 0);
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      const B = await page.evaluate(() => window.__fixture.B);
+      assert.equal(snap.rows.filter((r) => r.owner_id === B).length, 1);
+      const del = snap.calls.filter((c) => c.operation === "delete_checkin");
+      assert.equal(del.length, 1); assert.equal(del[0].uid, await page.evaluate(() => window.__fixture.A));
+      await page.evaluate(() => window.__fixture.switchUser(window.__fixture.A));
+    });
+
     await scenario("홈: 응답 유실 뒤 같은 ID로 다시 남겨도 기록은 하나", async () => {
       await fresh("home");
       await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
