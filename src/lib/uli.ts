@@ -28,22 +28,26 @@ export const ULI_LABEL: Record<UliState, string> = {
   rest: "조용히 떠 있는 고양이 유령 울이",
 };
 
+type Owned = { owner_id: string; occurred_at: string; recorded_at: string; burden: Burden };
+
 /**
- * 내 기록 중 경험한 시점(occurred_at)이 가장 늦은 기록 하나의 버거움.
+ * 내 기록 중 경험한 시점(occurred_at)이 가장 늦은 기록 하나. 같으면 나중에 입력한 기록.
  * 다른 사람의 기록은 무시한다. 여러 기록을 섞거나 평균 내지 않는다. 없으면 null.
  */
-export function latestOwnBurden(
-  records: ReadonlyArray<{ owner_id: string; occurred_at: string; recorded_at: string; burden: Burden }>,
-  ownerId: string,
-): Burden | null {
-  let best: { t: number; r: number; burden: Burden } | null = null;
+export function latestOwn<T extends Owned>(records: ReadonlyArray<T>, ownerId: string): T | null {
+  let best: { t: number; r: number; rec: T } | null = null;
   for (const rec of records) {
     if (rec.owner_id !== ownerId) continue;
     const t = Date.parse(rec.occurred_at);
     const r = Date.parse(rec.recorded_at);
     if (Number.isNaN(t)) continue;
     const rr = Number.isNaN(r) ? 0 : r;
-    if (!best || t > best.t || (t === best.t && rr > best.r)) best = { t, r: rr, burden: rec.burden };
+    if (!best || t > best.t || (t === best.t && rr > best.r)) best = { t, r: rr, rec };
   }
-  return best ? best.burden : null;
+  return best ? best.rec : null;
+}
+
+/** latestOwn의 버거움만. 없으면 null → 울이는 기본 모습. */
+export function latestOwnBurden(records: ReadonlyArray<Owned>, ownerId: string): Burden | null {
+  return latestOwn(records, ownerId)?.burden ?? null;
 }

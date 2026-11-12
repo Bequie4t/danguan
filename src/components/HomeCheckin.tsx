@@ -3,7 +3,8 @@
 // 홈에서 바로 기록하기 (2단계).
 //  - 버거움을 한 번 누르면 새 기록을 만든다. 저장 규칙은 quickSave.ts: 만들거나 확인만 하고, 고치지 않는다.
 //  - 서버가 저장된 기록을 돌려주기 전에는 '남겨 뒀어요'를 보이지 않는다. 실패하면 고른 값과 기록 ID를 그대로 둔다.
-//  - 응답이 사라진 뒤에는 처음 값 그대로 저장 여부만 확인한다. 그사이 다른 곳에서 고친 내용은 덮어쓰지 않는다.
+//  - 응답이 사라진 뒤에는 같은 ID를 조회만 해서 저장 여부를 확인한다(쓰기 없음). 다른 곳에서 고친 내용을 덮어쓰지 않고,
+//    다른 곳에서 지운 기록을 되살리지 않는다. 없으면 사용자가 "새로 남기기"를 눌러야 새 ID로 다시 만든다.
 //  - 울이는 서버에서 확인한 내 기록 중 경험 시점이 가장 늦은 하나를 따른다. 평균·대표값을 만들지 않는다.
 //  - 로그인 전에는 저장하지 않고 로그인 안내만 보인다. 로그아웃하면 이 화면 상태는 통째로 사라진다(AuthScope).
 //  - 방금 남긴 기록은 "되돌리기"로 지울 수 있다. 다른 곳에서 고치지 않은 기록(version 1, 보낸 값 그대로)만 대상이고,
@@ -23,10 +24,10 @@ import {
   type Checkin,
   type CreateCheckinParams,
 } from "@/lib/checkins/model";
-import { FAIL_TEXT, deleteCheckin, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
-import { quickSave } from "@/lib/checkins/quickSave";
+import { FAIL_TEXT, deleteCheckin, isUncertain, listCheckins, type FailReason, type RecordsClient } from "@/lib/checkins/api";
+import { confirmSaved, quickSave, type QuickOutcome } from "@/lib/checkins/quickSave";
 import { ownedBy } from "@/lib/session/guard";
-import { latestOwnBurden, uliStateFor } from "@/lib/uli";
+import { latestOwn, uliStateFor } from "@/lib/uli";
 import AuthScope, { useAuthScope, useScopedRequest } from "./AuthScope";
 import Uli from "./Uli";
 
@@ -78,20 +79,27 @@ function Checking() {
 }
 
 type Saved = { record: Checkin; untouched: boolean };
+type Status = "idle" | "saving" | "checking" | "saved" | "failed" | "missing";
+
+const PENDING_TEXT =
+  "연결이 불안정해서 저장됐는지 확인하지 못했어요. 확인할 때까지 다른 값은 고를 수 없어요. ‘저장됐는지 확인하기’는 기록을 조회만 하고 새로 만들지 않아요.";
+const MISSING_TEXT =
+  "이 기록은 남아 있지 않아요. 저장되지 않았거나 다른 곳에서 지웠을 수 있어요. 다시 남기려면 새로 남겨 주세요.";
 
 function QuickCheckin() {
   const { uid, guard } = useAuthScope();
   const run = useScopedRequest();
   const [consent, setConsent] = useState<ConsentState | "loading">("loading");
-  // 울이가 따르는 값: 서버에서 확인한 내 기록 중 경험 시점이 가장 늦은 기록의 버거움
-  const [shown, setShown] = useState<Burden | null>(null);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  // 울이가 따르는 기록: 서버에서 확인한 내 기록 중 경험 시점이 가장 늦은 하나 (id로 어떤 기록인지 기억)
+  const [shown, setShown] = useState<{ id: string; burden: Burden } | null>(null);
+  const [latestFailed, setLatestFailed] = useState(false);
+  const [status, setStatus] = useState<Status>("idle");
   const [failReason, setFailReason] = useState<FailReason | null>(null);
   const [picked, setPicked] = useState<Burden | null>(null);
   const [saved, setSaved] = useState<Saved | null>(null);
-  // 새 기록 ID. 저장이 확인될 때까지 바뀌지 않는다 (재전송해도 중복 없음).
+  // 새 기록 ID. 저장이 확인되거나 '없음'이 확인되면 새로 만든다.
   const draftId = useRef(makeId());
-  // 결과를 모르는 저장 요청. 다음 시도는 이 값 그대로 다시 보내 확인만 한다 (quickSave.ts 규칙).
+  // 결과를 모르는 저장 요청. 다음에는 조회만 한다 (quickSave.ts 규칙 2).
   const pending = useRef<{ uid: string; params: CreateCheckinParams } | null>(null);
   const [hasPending, setHasPending] = useState(false);
   // 방금 남긴 기록 되돌리기 상태 (어떤 기록에 대한 것인지 id로 묶는다)
@@ -108,9 +116,15 @@ function QuickCheckin() {
     const mineLoad = ++latestLoad.current;
     void run((client) => listCheckins(client as unknown as RecordsClient, 20)).then((r) => {
       if (mineLoad !== latestLoad.current) return;
-      if (!("ticket" in r) || !guard.isCurrent(r.ticket) || !r.ok || r.value.kind !== "ok") return;
+      if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+      if (!r.ok || r.value.kind !== "ok") {
+        setLatestFailed(true);
+        return;
+      }
       const mine = r.value.records.filter((rec) => ownedBy(rec, r.ticket));
-      setShown(latestOwnBurden(mine, uid));
+      const latest = latestOwn(mine, uid);
+      setShown(latest ? { id: latest.id, burden: latest.burden } : null);
+      setLatestFailed(false);
     });
   }, [run, guard, uid]);
 
@@ -125,26 +139,11 @@ function QuickCheckin() {
     loadLatest();
   }, [run, guard, loadLatest]);
 
-  async function save(b: Burden) {
-    if (status === "saving" || undo?.status === "working") return;
-    const prev = pending.current && pending.current.uid === uid ? pending.current.params : null;
-    // 결과를 모르는 요청이 있으면 그 값만 다시 확인한다. 다른 값을 섞지 않는다.
-    const value = prev ? prev.p_burden : b;
-    setUndo(null);
-    setPicked(value);
-    setFailReason(null);
-    setStatus("saving");
-    const draft = { id: draftId.current, burden: value, tags: [], note: "", recallLocal: null };
-    const r = await run((client) => quickSave(client as unknown as RecordsClient, draft, prev, new Date(), currentTimeZone()));
-    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
-    if (!r.ok) {
-      setFailReason("unknown");
-      setStatus("failed");
-      return;
-    }
-    const res = r.value;
+  const busy = status === "saving" || status === "checking" || undo?.status === "working";
+
+  function apply(res: QuickOutcome, ticket: Parameters<typeof ownedBy>[1]) {
     if (res.kind === "saved") {
-      if (!ownedBy(res.record, r.ticket)) {
+      if (!ownedBy(res.record, ticket)) {
         setFailReason("unknown");
         setStatus("failed");
         return;
@@ -155,6 +154,13 @@ function QuickCheckin() {
       setStatus("saved");
       // 울이는 방금 확인한 기록이 아니라, 내 기록 중 경험 시점이 가장 늦은 기록을 다시 확인해 따른다.
       loadLatest();
+      return;
+    }
+    if (res.kind === "missing") {
+      // 저장되지 않았거나 다른 곳에서 지운 기록. 같은 ID로 다시 만들지 않는다.
+      setPending(null);
+      draftId.current = makeId();
+      setStatus("missing");
       return;
     }
     if (res.kind === "invalid") {
@@ -169,8 +175,43 @@ function QuickCheckin() {
     if (res.reason === "no_consent") setConsent("missing");
   }
 
+  /** 새 기록 남기기. 결과를 모르는 요청이 있으면 하지 않는다. */
+  async function save(b: Burden) {
+    if (busy || pending.current) return;
+    setUndo(null);
+    setPicked(b);
+    setFailReason(null);
+    setStatus("saving");
+    const draft = { id: draftId.current, burden: b, tags: [], note: "", recallLocal: null };
+    const r = await run((client) => quickSave(client as unknown as RecordsClient, draft, new Date(), currentTimeZone()));
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      // 세션 확인 등 보내기 전 단계에서 멈춘 경우(quickSave는 연결 오류를 결과로 돌려주고 던지지 않는다). 저장 안 됨.
+      setFailReason("unknown");
+      setStatus("failed");
+      return;
+    }
+    apply(r.value, r.ticket);
+  }
+
+  /** 결과를 모르는 요청이 저장됐는지 조회만 한다. */
+  async function confirm() {
+    const prev = pending.current && pending.current.uid === uid ? pending.current.params : null;
+    if (!prev || busy) return;
+    setFailReason(null);
+    setStatus("checking");
+    const r = await run((client) => confirmSaved(client as unknown as RecordsClient, prev));
+    if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
+    if (!r.ok) {
+      setFailReason("unknown");
+      setStatus("failed");
+      return;
+    }
+    apply(r.value, r.ticket);
+  }
+
   async function undoLast() {
-    if (!saved || !saved.untouched || status !== "saved" || undo?.status === "working") return;
+    if (!saved || !saved.untouched || status !== "saved" || busy) return;
     const rec = saved.record;
     const id = rec.id;
     setUndo({ id, status: "working" });
@@ -185,6 +226,8 @@ function QuickCheckin() {
     if (res.kind === "deleted" || res.kind === "not_found") {
       // not_found: 앞선 되돌리기 요청이 이미 지웠는데 응답만 사라진 경우 등. 내 기록이 남아 있지 않다.
       setUndo({ id, status: "done" });
+      // 울이가 지운 기록을 따르고 있었다면 우선 기본 모습으로 돌리고, 남은 기록을 다시 조회한다.
+      setShown((cur) => (cur?.id === id ? null : cur));
       loadLatest();
     } else if (res.kind === "conflict") {
       setUndo({ id, status: ownedBy(res.server, r.ticket) ? "conflict" : "failed" });
@@ -193,9 +236,11 @@ function QuickCheckin() {
     }
   }
 
+  const burden = shown?.burden ?? null;
+
   if (consent === "missing") {
     return (
-      <Stage burden={shown}>
+      <Stage burden={burden}>
         <h1 id="home-question" className="text-2xl font-bold">
           {QUESTION}
         </h1>
@@ -207,10 +252,10 @@ function QuickCheckin() {
     );
   }
 
-  const saving = status === "saving";
   const failed = status === "failed";
   const undoing = undo?.status === "working";
   const undoFor = saved && undo?.id === saved.record.id ? undo.status : null;
+  const highlight = status === "saving" || status === "checking" || failed || status === "missing";
   const recordsLink = (
     <Link href="/records" className="text-accent underline underline-offset-4">
       내 기록에서 확인
@@ -218,18 +263,18 @@ function QuickCheckin() {
   );
 
   return (
-    <Stage burden={shown}>
+    <Stage burden={burden}>
       <div className="flex items-baseline justify-between gap-3">
         <h1 id="home-question" className="text-2xl font-bold">
           {QUESTION}
         </h1>
         <span className="shrink-0 text-xs text-muted">누르면 저장</span>
       </div>
-      <fieldset disabled={saving || undoing || hasPending || consent === "loading"} aria-busy={saving || undoing}>
+      <fieldset disabled={busy || hasPending || consent === "loading"} aria-busy={busy}>
         <legend className="sr-only">버거운 정도</legend>
         <div className="flex flex-wrap gap-2">
           {BURDEN_OPTIONS.map((o) => {
-            const on = (saving || failed) && picked === o.value;
+            const on = highlight && picked === o.value;
             return (
               <button
                 key={o.value}
@@ -248,8 +293,9 @@ function QuickCheckin() {
       </fieldset>
 
       {/* 저장 상태: 서버 확인 전에는 완료로 보이지 않는다 */}
-      <div aria-live="polite" className="text-sm">
-        {saving && <p>남기는 중이에요. 아직 완료되지 않았어요.</p>}
+      <div aria-live="polite" className="space-y-2 text-sm">
+        {status === "saving" && <p>남기는 중이에요. 아직 완료되지 않았어요.</p>}
+        {status === "checking" && <p>저장됐는지 확인하는 중이에요. 새로 만들지 않고 조회만 해요.</p>}
         {status === "saved" && saved && undoFor === "done" && <p>되돌렸어요. 방금 남긴 기록을 지웠어요.</p>}
         {status === "saved" && saved && undoFor !== "done" && saved.untouched && (
           <div className="space-y-2">
@@ -283,24 +329,51 @@ function QuickCheckin() {
             이미 남겨진 기록이에요 · {burdenLabel(saved.record.burden)}. 다른 곳에서 고친 내용은 그대로 두었어요. {recordsLink}해 주세요.
           </p>
         )}
+        {status === "missing" && picked && (
+          <div role="alert" className="space-y-2 rounded bg-warn-soft p-3 text-warn">
+            <p>{MISSING_TEXT}</p>
+            <button
+              type="button"
+              onClick={() => void save(picked)}
+              className="min-h-11 rounded-full border border-current px-4 font-semibold"
+            >
+              ‘{burdenLabel(picked)}’ 새로 남기기
+            </button>
+          </div>
+        )}
         {failed && failReason && (
           <div role="alert" className="space-y-2 rounded bg-warn-soft p-3 text-warn">
-            <p>{FAIL_TEXT[failReason]}</p>
-            {hasPending && <p>저장됐는지 확인할 때까지 다른 값은 고를 수 없어요. 처음 고른 값 그대로 확인해요.</p>}
+            <p>{hasPending && isUncertain(failReason) ? PENDING_TEXT : FAIL_TEXT[failReason]}</p>
             {failReason === "signed_out" ? (
               <a href="/login?next=/" className="inline-block rounded-full border border-current px-4 py-2 font-semibold">
                 다시 로그인하기
               </a>
-            ) : failReason !== "no_consent" && picked ? (
+            ) : hasPending ? (
+              <button
+                type="button"
+                onClick={() => void confirm()}
+                className="min-h-11 rounded-full border border-current px-4 font-semibold"
+              >
+                저장됐는지 확인하기
+              </button>
+            ) : failReason !== "no_consent" && failReason !== "invalid" && picked ? (
               <button
                 type="button"
                 onClick={() => void save(picked)}
-                className="rounded-full border border-current px-4 py-2 font-semibold"
+                className="min-h-11 rounded-full border border-current px-4 font-semibold"
               >
                 다시 남기기
               </button>
             ) : null}
           </div>
+        )}
+        {latestFailed && (
+          <p>
+            울이 모습을 불러오지 못했어요.{" "}
+            <button type="button" onClick={loadLatest} className="min-h-11 text-accent underline underline-offset-4">
+              울이 다시 불러오기
+            </button>
+          </p>
         )}
       </div>
     </Stage>

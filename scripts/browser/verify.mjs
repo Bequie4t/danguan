@@ -54,6 +54,11 @@ try {
       await page.getByRole("button", { name: "버거워요", exact: true }).click();
       await page.locator("#note").fill(note);
     };
+    // 같은 제목의 화면이 A·B 모두에 있으므로, 실제로 B 화면으로 바뀐 뒤에 검사한다.
+    const waitScope = (who) => page.waitForFunction((who) => {
+      const f = window.__fixture;
+      return document.querySelector(`[data-scope-uid="${f[who]}"]`) !== null;
+    }, who);
     const scenario = async (name, fn) => {
       await fn();
       assert.deepEqual(errors, [], "브라우저 예외 없음");
@@ -66,6 +71,7 @@ try {
       await page.evaluate(() => { const f = window.__fixture; f.setConsent(f.A, true); f.hold("consents"); f.mount("consent"); });
       await page.waitForFunction(() => window.__fixture.started("consents"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("consents"); });
+      await waitScope("B");
       await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
       assert.equal(await page.locator("#consent-check").isChecked(), false);
       assert.equal(new URL(page.url()).searchParams.get("screen"), "consent");
@@ -78,6 +84,7 @@ try {
       await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).click();
       await page.waitForFunction(() => window.__fixture.started("grant_consent"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("grant_consent"); });
+      await waitScope("B");
       await page.getByRole("heading", { name: "기록을 계정에 저장하기 전에", exact: true }).waitFor();
       assert.equal(await page.locator("#consent-check").isChecked(), false);
       assert.equal(new URL(page.url()).searchParams.get("screen"), "consent");
@@ -126,6 +133,7 @@ try {
     await scenario("A 입력이 B 화면으로 넘어가지 않고 B 목록만 표시", async () => {
       await fresh(); await prepare("가상 A 작성 중");
       await page.evaluate(() => window.__fixture.switchUser(window.__fixture.B));
+      await waitScope("B");
       await page.getByRole("button", { name: "선택 사항 더하기", exact: false }).waitFor();
       await page.getByRole("button", { name: "선택 사항 더하기", exact: false }).click();
       assert.equal(await page.locator("#note").inputValue(), "");
@@ -140,6 +148,7 @@ try {
       await page.getByRole("button", { name: "저장하기", exact: true }).click();
       await page.waitForFunction(() => window.__fixture.started("create_checkin"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("create_checkin"); });
+      await waitScope("B");
       await page.getByRole("button", { name: "선택 사항 더하기", exact: false }).waitFor();
       assert.equal(await page.getByText("저장했어요.", { exact: true }).count(), 0);
       const snapshot = await page.evaluate(() => window.__fixture.snapshot());
@@ -181,6 +190,7 @@ try {
       await page.getByRole("button", { name: "다시 불러오기", exact: true }).click();
       await page.waitForFunction(() => window.__fixture.started("checkins"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("checkins"); });
+      await waitScope("B");
       await page.getByText("가상 B 기록", { exact: true }).waitFor();
       assert.equal(await page.getByText("가상 A 기록", { exact: true }).count(), 0);
     });
@@ -291,6 +301,7 @@ try {
       await page.getByRole("button", { name: "되돌리기", exact: true }).click();
       await page.waitForFunction(() => window.__fixture.started("delete_checkin"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("delete_checkin"); });
+      await homeSaved().waitFor({ state: "detached" });
       await page.getByRole("button", { name: "견딜 만해요", exact: true }).waitFor();
       await page.waitForTimeout(200);
       assert.equal(await page.getByText("되돌렸어요", { exact: false }).count(), 0);
@@ -302,30 +313,73 @@ try {
       await page.evaluate(() => window.__fixture.switchUser(window.__fixture.A));
     });
 
-    await scenario("홈: 응답 유실 뒤 같은 ID로 다시 남겨도 기록은 하나", async () => {
+    await scenario("홈: 응답 유실 뒤 '저장됐는지 확인하기'는 조회만 하고 기록은 하나", async () => {
       await fresh("home");
       await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
       await page.getByRole("button", { name: "견딜 만해요", exact: true }).click();
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
       assert.equal(await homeSaved().count(), 0);
+      assert.equal(await page.getByRole("button", { name: "다시 남기기", exact: true }).count(), 0, "결과를 모를 때는 다시 만드는 버튼이 없음");
       assert.equal(await page.getByRole("button", { name: "견딜 만해요", exact: true }).getAttribute("aria-pressed"), "true");
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
       await homeSaved().waitFor();
       const snap = await page.evaluate(() => window.__fixture.snapshot());
       const sends = snap.calls.filter((c) => c.operation === "create_checkin");
-      assert.equal(sends.length, 2); assert.equal(sends[0].id, sends[1].id);
+      assert.equal(sends.length, 1, "확인 단계에서 생성 요청 없음");
+      const reads = snap.calls.filter((c) => c.operation === "checkins_by_id");
+      assert.equal(reads.length, 1); assert.equal(reads[0].id, sends[0].id);
       assert.equal(snap.rows.filter((r) => r.id === sends[0].id).length, 1);
+      assert.ok(await page.getByRole("button", { name: "되돌리기", exact: true }).count() === 1, "손대지 않은 기록이면 되돌리기 가능");
     });
 
-    await scenario("홈: 응답 유실 → 다른 탭에서 메모·태그 추가 → 같은 값 재시도해도 덮어쓰지 않음", async () => {
+    await scenario("홈: 응답 유실 → 다른 탭에서 삭제 → 확인해도 되살리지 않고, 새로 남기기는 새 ID", async () => {
       await fresh("home");
       await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
       await page.getByRole("button", { name: "버거워요", exact: true }).click();
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
+      const id = (await page.evaluate(() => window.__fixture.snapshot())).calls.find((c) => c.operation === "create_checkin").id;
+      await page.evaluate((id) => window.__fixture.removeElsewhere(id), id);
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
+      await page.getByText("이 기록은 남아 있지 않아요.", { exact: false }).waitFor();
+      let snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.rows.some((r) => r.id === id), false, "지운 기록이 되살아나지 않음");
+      assert.equal(snap.calls.filter((c) => c.operation === "create_checkin").length, 1, "확인은 생성 요청을 보내지 않음");
+      assert.equal(await homeSaved().count(), 0);
+      assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), false, "없음이 확인되면 다시 고를 수 있음");
+      await page.getByRole("button", { name: "‘버거워요’ 새로 남기기", exact: true }).click();
+      await homeSaved().waitFor();
+      snap = await page.evaluate(() => window.__fixture.snapshot());
+      const creates = snap.calls.filter((c) => c.operation === "create_checkin");
+      assert.equal(creates.length, 2);
+      assert.notEqual(creates[1].id, id, "새로 남길 때는 새 ID");
+      assert.equal(snap.rows.some((r) => r.id === id), false);
+      assert.equal(snap.rows.filter((r) => r.id === creates[1].id).length, 1);
+    });
+
+    await scenario("홈 되돌리기 뒤 울이 조회가 실패해도 지운 기록 모습에 머물지 않음", async () => {
+      await fresh("home");
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      await homeSave("괜찮은 편이에요");
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("가볍게"));
+      await page.evaluate(() => { window.__fixture.failure = "list_error"; });
+      await page.getByRole("button", { name: "되돌리기", exact: true }).click();
+      await page.getByText("되돌렸어요. 방금 남긴 기록을 지웠어요.", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "울이 다시 불러오기", exact: true }).waitFor();
+      assert.ok((await uliLabel()).includes("조용히"), "지운 기록 대신 기본 모습");
+      await page.getByRole("button", { name: "울이 다시 불러오기", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
+      assert.equal(await page.getByRole("button", { name: "울이 다시 불러오기", exact: true }).count(), 0);
+    });
+
+    await scenario("홈: 응답 유실 → 다른 탭에서 메모·태그 추가 → 확인해도 덮어쓰지 않음", async () => {
+      await fresh("home");
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "버거워요", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
       assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), true, "확인 전에는 다른 값을 고를 수 없음");
       const id = (await page.evaluate(() => window.__fixture.snapshot())).calls.find((c) => c.operation === "create_checkin").id;
       await page.evaluate((id) => window.__fixture.editElsewhere(id, { note: "가상 다른 탭 메모", tags: ["sleep", "meal"] }), id);
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
       await page.getByText("이미 남겨진 기록이에요", { exact: false }).waitFor();
       const snap = await page.evaluate(() => window.__fixture.snapshot());
       const rec = snap.rows.find((r) => r.id === id);
@@ -333,21 +387,21 @@ try {
       assert.deepEqual(rec.tags, ["sleep", "meal"]);
       assert.equal(rec.version, 2);
       assert.equal(snap.calls.filter((c) => c.operation === "update_checkin").length, 0, "홈은 수정 요청을 보내지 않음");
-      assert.equal(snap.calls.filter((c) => c.operation === "create_checkin" && c.id === id).length, 2);
+      assert.equal(snap.calls.filter((c) => c.operation === "create_checkin" && c.id === id).length, 1, "확인 단계에서 생성 요청 없음");
       assert.equal(await page.getByRole("button", { name: "되돌리기", exact: true }).count(), 0, "다른 곳에서 고친 기록은 되돌리기 대상 아님");
       assert.equal(await page.getByRole("link", { name: "내 기록에서 확인", exact: true }).getAttribute("href"), "/records");
       assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), false, "확인 뒤에는 다시 고를 수 있음");
     });
 
-    await scenario("홈: 재시도로 옛 기록을 확인해도 울이는 경험 시점이 가장 늦은 기록을 따름", async () => {
+    await scenario("홈: 옛 기록 저장을 확인해도 울이는 경험 시점이 가장 늦은 기록을 따름", async () => {
       await fresh("home");
       await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));
       await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
       await page.getByRole("button", { name: "많이 버거워요", exact: true }).click();
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).waitFor();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
       const later = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       await page.evaluate((t) => { const f = window.__fixture; f.addRecord(f.A, "0000000000c1", "okay", t); }, later);
-      await page.getByRole("button", { name: "다시 남기기", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
       await homeSaved().waitFor();
       await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("가볍게"));
       assert.equal((await uliLabel()).includes("녹듯"), false, "방금 확인한 옛 기록으로 울이를 바꾸지 않음");
@@ -359,6 +413,7 @@ try {
       await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).click();
       await page.waitForFunction(() => window.__fixture.started("create_checkin"));
       await page.evaluate(() => { const f = window.__fixture; f.switchUser(f.B); f.release("create_checkin"); });
+      await page.getByText("남기는 중이에요", { exact: false }).waitFor({ state: "detached" });
       await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).waitFor();
       await page.waitForTimeout(200);
       assert.equal(await homeSaved().count(), 0);

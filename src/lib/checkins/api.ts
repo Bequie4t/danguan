@@ -26,6 +26,7 @@ export interface RecordsClient {
         column: string,
         opts: { ascending: boolean },
       ): { limit(n: number): PromiseLike<Result<unknown[]>> };
+      eq(column: "id", value: string): { limit(n: number): PromiseLike<Result<unknown[]>> };
     };
   };
 }
@@ -167,5 +168,19 @@ export async function listCheckins(client: RecordsClient, limit = 200): Promise<
     return { kind: "ok", records };
   } catch {
     return { kind: "error", reason: "network" };
+  }
+}
+
+export type GetResult = { kind: "found"; record: Checkin } | { kind: "missing" } | { kind: "error"; reason: FailReason };
+
+/** ID 하나만 조회한다. 쓰기 요청을 보내지 않는다. RLS로 내 기록만 보인다. */
+export async function getCheckin(client: RecordsClient, id: string): Promise<GetResult> {
+  try {
+    const { data, error } = await client.from("checkins").select("*").eq("id", id).limit(1);
+    if (error) return { kind: "error", reason: classifyError(error) };
+    const record = (data ?? []).map(parseCheckin).find((r): r is Checkin => r !== null && r.id === id);
+    return record ? { kind: "found", record } : { kind: "missing" };
+  } catch (e) {
+    return { kind: "error", reason: classifyError({ code: "", message: e instanceof Error ? e.message : "network" }) };
   }
 }

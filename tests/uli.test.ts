@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BURDEN_OPTIONS } from "../src/lib/checkins/model";
-import { ULI_LABEL, latestOwnBurden, uliStateFor, type UliState } from "../src/lib/uli";
+import { ULI_LABEL, latestOwn, latestOwnBurden, uliStateFor, type UliState } from "../src/lib/uli";
 import Uli from "../src/components/Uli";
 
 test("울이는 고른 버거움 하나를 그대로 따른다", () => {
@@ -84,4 +84,15 @@ test("같은 시점이면 나중에 입력한 기록을 따르고, 평균을 내
 test("기록이 없으면 null → 울이는 기본 모습", () => {
   assert.equal(latestOwnBurden([], A), null);
   assert.equal(uliStateFor(latestOwnBurden([], A)), "rest");
+});
+
+test("latestOwn은 울이가 따르는 기록이 어느 것인지(id) 알려 준다", () => {
+  const records = [
+    { ...rec(A, "2026-11-01T09:00:00Z", "okay"), id: "r1" },
+    { ...rec(A, "2026-11-03T09:00:00Z", "heavy"), id: "r2" },
+    { ...rec(B, "2026-11-09T09:00:00Z", "okay"), id: "r3" },
+  ];
+  assert.equal(latestOwn(records, A)?.id, "r2");
+  assert.equal(latestOwn(records.filter((r) => r.id !== "r2"), A)?.id, "r1");
+  assert.equal(latestOwn([], A), null);
 });
