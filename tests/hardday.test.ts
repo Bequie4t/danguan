@@ -81,25 +81,77 @@ test("저장 → 다시 읽기 → 지우기, 저장은 다시 읽어 같을 때
   const s = new MemoryStore();
   assert.deepEqual(loadCard(s), { status: "empty" });
   const card = normalize({ foods: [{ name: "가상 죽", url: "" }], people: ["민지"], message: "가상 부탁" }, NOW);
-  assert.equal(saveCard(s, card), true);
-  assert.deepEqual(loadCard(s), { status: "ok", card });
+  const r = saveCard(s, card, null);
+  assert.equal(r.status, "saved");
+  const loaded = loadCard(s);
+  assert.equal(loaded.status, "ok");
+  if (loaded.status === "ok" && r.status === "saved") {
+    assert.deepEqual(loaded.card, card);
+    assert.equal(loaded.raw, r.raw);
+  }
   assert.deepEqual([...s.data.keys()], [STORAGE_KEY], "정해진 키 하나만 씀");
   assert.equal(clearCard(s), true);
   assert.deepEqual(loadCard(s), { status: "empty" });
 });
 
-test("저장소를 쓸 수 없거나 쓰기가 실패하면 성공으로 표시하지 않는다", () => {
+test("다른 창에서 지우거나 바꾼 카드는 저장 직전에 알아채고 덮어쓰지 않는다 (확인하면 저장)", () => {
+  const s = new MemoryStore();
+  const a = normalize({ foods: [], people: ["민지"], message: "가상 A" }, NOW);
+  const first = saveCard(s, a, null);
+  assert.equal(first.status, "saved");
+  const base = first.status === "saved" ? first.raw : null;
+  // 다른 창에서 지움 → 이 창의 저장은 충돌, 지운 카드가 되살아나지 않음
+  s.removeItem(STORAGE_KEY);
+  const edited = normalize({ foods: [], people: ["민지"], message: "가상 A 고침" }, NOW);
+  assert.deepEqual(saveCard(s, edited, base), { status: "conflict" });
+  assert.equal(s.getItem(STORAGE_KEY), null, "지운 카드가 되살아남");
+  // 다른 창에서 바꿈 → 충돌, 다른 창 내용 유지
+  const other = saveCard(s, normalize({ foods: [], people: [], message: "가상 다른 창" }, NOW), null);
+  assert.equal(other.status, "saved");
+  assert.deepEqual(saveCard(s, edited, base), { status: "conflict" });
+  assert.match(s.getItem(STORAGE_KEY)!, /가상 다른 창/);
+  // 사용자가 확인하고 저장(force)하면 저장
+  assert.equal(saveCard(s, edited, base, true).status, "saved");
+  assert.match(s.getItem(STORAGE_KEY)!, /가상 A 고침/);
+});
+
+test("저장소를 쓸 수 없거나, 용량 초과로 쓰기가 실패하면 성공으로 표시하지 않는다. 읽기만 되면 기존 카드는 보인다", () => {
   const card = normalize({ foods: [], people: [], message: "가상" }, NOW);
   assert.deepEqual(loadCard(null), { status: "unavailable" });
-  assert.equal(saveCard(null, card), false);
-  const throwing: KeyValueStore = { getItem: () => { throw new Error("x"); }, setItem: () => { throw new Error("QuotaExceeded"); }, removeItem: () => { throw new Error("x"); } };
+  assert.deepEqual(saveCard(null, card, null), { status: "failed" });
+  const throwing: KeyValueStore = { getItem: () => { throw new Error("x"); }, setItem: () => { throw new Error("x"); }, removeItem: () => { throw new Error("x"); } };
   assert.deepEqual(loadCard(throwing), { status: "unavailable" });
-  assert.equal(saveCard(throwing, card), false);
+  assert.deepEqual(saveCard(throwing, card, null), { status: "failed" });
   assert.equal(clearCard(throwing), false);
+  // 읽기는 되고 쓰기만 용량 초과
+  const mem = new MemoryStore();
+  const kept = saveCard(mem, card, null);
+  assert.equal(kept.status, "saved");
+  const quota: KeyValueStore = {
+    getItem: (k) => mem.getItem(k),
+    setItem: () => { throw new DOMException("가상 용량 초과", "QuotaExceededError"); },
+    removeItem: (k) => mem.removeItem(k),
+  };
+  assert.equal(loadCard(quota).status, "ok", "쓰기가 안 돼도 저장된 카드는 읽힘");
+  assert.deepEqual(saveCard(quota, normalize({ foods: [], people: [], message: "가상 새" }, NOW), kept.status === "saved" ? kept.raw : null), { status: "failed" });
+  assert.match(mem.getItem(STORAGE_KEY)!, /"가상"/, "실패한 저장이 기존 카드를 망가뜨리지 않음");
   const silent: KeyValueStore = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
-  assert.equal(saveCard(silent, card), false, "써도 남지 않으면 실패");
+  assert.deepEqual(saveCard(silent, card, null), { status: "failed" }, "써도 남지 않으면 실패");
   const sticky: KeyValueStore = { getItem: () => "x", setItem: () => {}, removeItem: () => {} };
   assert.equal(clearCard(sticky), false, "지워지지 않으면 실패");
+});
+
+test("한글이 든 주문 주소는 자르지 않고 통째로 보존하고, 너무 길면 자르지 않고 저장 전에 알린다", () => {
+  const korean = "https://example.test/가상매장/주문?매장=서울특별시중구가상동123번지&메뉴=소고기야채죽특&옵션=덜맵게";
+  const kept = safeUrl(korean);
+  assert.ok(kept.length > 300, "인코딩 뒤 300자를 넘는 정상 주소");
+  assert.equal(decodeURI(kept), korean, "주소가 잘리거나 바뀜");
+  assert.equal(urlProblem(korean), null);
+  const card = normalize({ foods: [{ name: "가상", url: korean }], people: [], message: "" }, NOW);
+  assert.equal(card.foods[0].url, kept);
+  const tooLong = "https://example.test/" + "a".repeat(LIMITS.foodUrl);
+  assert.match(urlProblem(tooLong) ?? "", /너무 길어요/);
+  assert.equal(safeUrl(tooLong), "", "너무 긴 주소를 잘라서 저장하면 안 됨");
 });
 
 test("손상되거나 모르는 버전의 저장값은 쓰지 않고, 저장값 안의 위험한 주소도 다시 걸러낸다", () => {

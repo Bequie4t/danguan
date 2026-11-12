@@ -17,7 +17,9 @@ import {
   hasContent,
   loadCard,
   normalize,
+  readRaw,
   saveCard,
+  STORAGE_KEY,
   urlProblem,
   type Food,
   type HardDayCard as Card,
@@ -29,7 +31,23 @@ const bigButton = `flex min-h-14 w-full items-center justify-center rounded-full
 
 type Draft = { foods: Food[]; people: string[]; message: string };
 type Phase = "loading" | "edit" | "view";
-type Notice = null | "saved" | "save-failed" | "cleared" | "clear-failed" | "broken" | "unavailable";
+type Notice =
+  | null
+  | "saved"
+  | "save-failed"
+  | "conflict"
+  | "cleared"
+  | "clear-failed"
+  | "broken"
+  | "unavailable"
+  | "removed-elsewhere"
+  | "changed-elsewhere"
+  | "changed-while-editing";
+
+function emptyDraft(): Draft {
+  const e = emptyCard();
+  return { foods: e.foods, people: e.people, message: e.message };
+}
 
 function fromCard(c: Card): Draft {
   return {
@@ -46,61 +64,129 @@ function formatSaved(iso: string): string {
 
 export default function HardDayCard() {
   const store = useRef<KeyValueStore | null>(null);
+  /** 이 화면이 마지막으로 본(또는 저장한) 원본. 저장 직전에 지금 값과 비교해 다른 창의 삭제·변경을 알아챈다. */
+  const baseRaw = useRef<string | null>(null);
   const [available, setAvailable] = useState(true);
   const [phase, setPhase] = useState<Phase>("loading");
   const [saved, setSaved] = useState<Card | null>(null);
-  const [draft, setDraft] = useState<Draft>(() => {
-    const e = emptyCard();
-    return { foods: e.foods, people: e.people, message: e.message };
-  });
+  const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [notice, setNotice] = useState<Notice>(null);
   const [confirmClear, setConfirmClear] = useState(false);
-  /** 저장할 수 없는 브라우저에서 '저장하지 않고 이번에만 보기'로 연 카드 */
+  /** '저장하지 않고 이번에만 보기'로 연 카드 (저장소에 없음) */
   const [temporary, setTemporary] = useState(false);
   const [copied, setCopied] = useState<{ result: "copied" | "failed"; text: string } | null>(null);
   const msgRef = useRef<HTMLTextAreaElement>(null);
+  const phaseRef = useRef<Phase>("loading");
+  const temporaryRef = useRef(false);
   const uid = useId();
+  phaseRef.current = phase;
+  temporaryRef.current = temporary;
 
-  // 처음 열 때 이 기기에 저장된 카드를 읽는다 (서버 렌더링 때는 읽지 않음)
+  // 처음 열 때 이 기기에 저장된 카드를 읽는다 (서버 렌더링 때는 읽지 않음). 읽기·저장·지우기는 따로 다룬다.
   useEffect(() => {
     store.current = browserStore();
     const r = loadCard(store.current);
+    const raw = readRaw(store.current);
+    baseRaw.current = raw === undefined ? null : raw;
     if (r.status === "ok") {
       setSaved(r.card);
       setDraft(fromCard(r.card));
       setPhase("view");
-      return;
+    } else {
+      if (r.status === "unavailable") {
+        setAvailable(false);
+        setNotice("unavailable");
+      }
+      if (r.status === "broken") setNotice("broken");
+      setPhase("edit");
     }
-    if (r.status === "unavailable") {
-      setAvailable(false);
-      setNotice("unavailable");
-    }
-    if (r.status === "broken") setNotice("broken");
-    setPhase("edit");
+
+    // 다른 창(탭)에서 지우거나 바꾸면 바로 반영한다. 지운 카드가 이 화면에 남아 되살아나지 않게.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY && e.key !== null) return;
+      const now = readRaw(store.current);
+      if (now === undefined || now === baseRaw.current) return;
+      const next = loadCard(store.current);
+      if (next.status === "empty") {
+        baseRaw.current = null;
+        setSaved(null);
+        setTemporary(false);
+        setDraft(emptyDraft());
+        setCopied(null);
+        setConfirmClear(false);
+        setPhase("edit");
+        setNotice("removed-elsewhere");
+        return;
+      }
+      if (next.status === "ok" && phaseRef.current === "view" && !temporaryRef.current) {
+        baseRaw.current = next.raw;
+        setSaved(next.card);
+        setDraft(fromCard(next.card));
+        setCopied(null);
+        setNotice("changed-elsewhere");
+        return;
+      }
+      // 적는 중이면 적던 내용은 두고 알리기만 한다 (저장할 때 다시 확인)
+      setNotice("changed-while-editing");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const problems = draft.foods.map((f) => urlProblem(f.url));
-  const canSave = available && hasContent(draft) && problems.every((p) => p === null);
+  const valid = hasContent(draft) && problems.every((p) => p === null);
+  const canSave = available && valid;
 
-  function save() {
+  function save(force = false) {
     if (!canSave) return;
     const card = normalize(draft, new Date());
-    if (saveCard(store.current, card)) {
+    const r = saveCard(store.current, card, baseRaw.current, force);
+    if (r.status === "saved") {
+      baseRaw.current = r.raw;
       setSaved(card);
+      setTemporary(false);
       setDraft(fromCard(card));
       setNotice("saved");
       setCopied(null);
       setPhase("view");
     } else {
-      setNotice("save-failed"); // 입력은 그대로 둔다
+      setNotice(r.status === "conflict" ? "conflict" : "save-failed"); // 입력은 그대로 둔다
+    }
+  }
+
+  function viewWithoutSaving() {
+    if (!valid) return;
+    setSaved(normalize(draft, new Date()));
+    setTemporary(true);
+    setCopied(null);
+    setNotice(null);
+    setPhase("view");
+  }
+
+  function reloadStored() {
+    const r = loadCard(store.current);
+    const raw = readRaw(store.current);
+    baseRaw.current = raw === undefined ? null : raw;
+    setTemporary(false);
+    setCopied(null);
+    if (r.status === "ok") {
+      setSaved(r.card);
+      setDraft(fromCard(r.card));
+      setNotice(null);
+      setPhase("view");
+    } else {
+      setSaved(null);
+      setDraft(emptyDraft());
+      setNotice(r.status === "broken" ? "broken" : null);
+      setPhase("edit");
     }
   }
 
   function clear() {
     if (clearCard(store.current)) {
-      const e = emptyCard();
+      baseRaw.current = null;
       setSaved(null);
-      setDraft({ foods: e.foods, people: e.people, message: e.message });
+      setDraft(emptyDraft());
       setNotice("cleared");
       setCopied(null);
       setPhase("edit");
@@ -138,11 +224,15 @@ export default function HardDayCard() {
 
   const noticeText: Record<Exclude<Notice, null>, string> = {
     saved: "이 기기에 저장했어요.",
-    "save-failed": "저장하지 못했어요. 적은 내용은 그대로 있어요. 다시 눌러 보거나, 이번에는 저장 없이 써 주세요.",
+    "save-failed": "저장하지 못했어요 (저장 공간 부족 등). 적은 내용은 그대로 있어요. 아래 ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
+    conflict: "다른 창에서 이 카드를 지우거나 바꿨어요. 그래서 저장하지 않았어요. 적은 내용은 그대로 있어요.",
     cleared: "이 기기에서 카드를 지웠어요.",
     "clear-failed": "지우지 못했어요. 브라우저 설정에서 이 사이트 데이터를 지울 수도 있어요.",
     broken: "저장된 카드를 읽을 수 없어서 쓰지 않았어요. 새로 적어 저장하면 바뀌어요.",
-    unavailable: "이 브라우저에서는 저장할 수 없어요 (사생활 보호 모드 등). 이번에만 쓰고 저장은 되지 않아요.",
+    unavailable: "이 브라우저에서는 저장할 수 없어요 (사생활 보호 모드 등). ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
+    "removed-elsewhere": "다른 창에서 이 카드를 지웠어요. 이 화면에서도 지웠어요.",
+    "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
+    "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
   };
 
   const header = (
@@ -196,7 +286,6 @@ export default function HardDayCard() {
                     type="url"
                     inputMode="url"
                     value={f.url}
-                    maxLength={LIMITS.foodUrl}
                     placeholder="https://"
                     autoComplete="off"
                     aria-invalid={problems[i] ? true : undefined}
@@ -270,44 +359,51 @@ export default function HardDayCard() {
             />
             <p className="text-sm">
               다른 부탁이 필요하면{" "}
-              <a href="/ask" className={`inline-flex min-h-11 items-center underline underline-offset-4 ${focusRing}`}>
-                부탁하기
+              <a
+                href="/ask"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex min-h-11 items-center underline underline-offset-4 ${focusRing}`}
+              >
+                부탁하기 (새 탭에서 열려요)
               </a>
-              에서 만들어 붙여 넣어도 돼요.
+              에서 만들어 붙여 넣어도 돼요. 이 화면에 적던 내용은 그대로 있어요.
             </p>
           </div>
 
           <div className="space-y-3 rounded bg-tint-sky p-4">
             <p className="text-sm">
-              <strong>이 기기 브라우저에만 저장돼요.</strong> 서버나 계정에는 올리지 않아요. 다른 기기에서는 보이지 않고, 다른
-              사람이 같이 쓰는 기기라면 저장하지 않는 편이 좋아요.
+              <strong>이 카드는 이 브라우저에 저장돼요.</strong> 로그아웃해도 남고, 같은 브라우저를 쓰는 사람은 로그인 없이 볼 수
+              있어요. 함께 쓰는 기기라면 ‘저장하지 않고 이번에만 보기’를 골라 주세요. 서버나 계정에는 올리지 않아요.
             </p>
-            <button
-              type="submit"
-              disabled={!canSave}
-              className={`pastel-fill ${bigButton} disabled:cursor-not-allowed disabled:opacity-50`}
-            >
-              이 기기에 저장하기
-            </button>
-            {!available && (
-              <>
-                <p className="text-sm">이 브라우저에서는 저장할 수 없어요.</p>
-                <button
-                  type="button"
-                  disabled={!hasContent(draft) || problems.some((p) => p !== null)}
-                  onClick={() => {
-                    setSaved(normalize(draft, new Date()));
-                    setTemporary(true);
-                    setCopied(null);
-                    setPhase("view");
-                  }}
-                  className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`}
-                >
-                  저장하지 않고 이번에만 보기
+            {notice === "conflict" ? (
+              <div role="group" aria-label="다른 창의 변경" className="space-y-2">
+                <button type="button" onClick={() => save(true)} disabled={!canSave} className={`pastel-fill ${bigButton} disabled:opacity-50`}>
+                  그래도 지금 적은 내용으로 저장하기
                 </button>
-              </>
+                <button type="button" onClick={reloadStored} className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold ${focusRing}`}>
+                  저장된 카드 다시 불러오기 (적은 내용은 사라져요)
+                </button>
+              </div>
+            ) : (
+              <button
+                type="submit"
+                disabled={!canSave}
+                className={`pastel-fill ${bigButton} disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                이 기기에 저장하기
+              </button>
             )}
-            {available && !hasContent(draft) && <p className="text-sm">하나라도 적으면 저장할 수 있어요.</p>}
+            {!available && <p className="text-sm">이 브라우저에서는 저장할 수 없어요.</p>}
+            {!hasContent(draft) && <p className="text-sm">하나라도 적으면 저장하거나 볼 수 있어요.</p>}
+            <button
+              type="button"
+              disabled={!valid}
+              onClick={viewWithoutSaving}
+              className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`}
+            >
+              저장하지 않고 이번에만 보기
+            </button>
             {saved && (
               <button
                 type="button"
@@ -443,10 +539,11 @@ export default function HardDayCard() {
           카드 고치기
         </button>
         {temporary ? (
-          <p className="text-sm text-muted">저장되지 않은 카드예요. 이 화면을 닫으면 다시 적어야 해요.</p>
+          <p className="text-sm text-muted">저장하지 않은 카드예요. 이 화면을 닫거나 새로 열면 다시 적어야 해요.</p>
         ) : (
           <p className="text-sm text-muted">
-            {formatSaved(card.savedAt)}에 이 기기 브라우저에 저장했어요. 다른 사람이 같이 쓰는 기기라면 지워 주세요.
+            {formatSaved(card.savedAt)}에 이 브라우저에 저장했어요. 로그아웃해도 남고, 같은 브라우저를 쓰는 사람은 로그인 없이 볼 수
+            있어요. 함께 쓰는 기기라면 지워 주세요.
           </p>
         )}
         {temporary ? null : !confirmClear ? (

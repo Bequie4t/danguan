@@ -11,7 +11,8 @@
 export const STORAGE_KEY = "404blue.hardday.v1";
 export const MAX_FOODS = 3;
 export const MAX_PEOPLE = 2;
-export const LIMITS = { foodName: 30, foodUrl: 300, person: 20, message: 300 } as const;
+/** foodUrl: 인코딩한 뒤의 길이 기준. 넘으면 자르지 않고 저장 전에 알린다. */
+export const LIMITS = { foodName: 30, foodUrl: 2000, person: 20, message: 300 } as const;
 
 export interface Food {
   name: string;
@@ -38,23 +39,31 @@ export function emptyCard(): Omit<HardDayCard, "savedAt"> {
 
 const clip = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
 
-/** https:// 주소만 허용. 아니면 빈 문자열 (링크로 만들지 않음) */
-export function safeUrl(raw: string): string {
+function parseHttps(raw: string): string | null {
   const s = raw.trim();
-  if (!s) return "";
+  if (!s) return null;
   try {
     const u = new URL(s);
-    if (u.protocol !== "https:" || !u.hostname || u.username || u.password) return "";
-    return u.toString().slice(0, LIMITS.foodUrl);
+    if (u.protocol !== "https:" || !u.hostname || u.username || u.password) return null;
+    return u.toString();
   } catch {
-    return "";
+    return null;
   }
 }
 
-/** 입력칸의 주소가 쓸 수 없는 형식인지 (비어 있으면 문제 없음) */
+/** https:// 주소만 허용, 통째로 보존한다. 형식이 다르거나 너무 길면 빈 문자열 (자르지 않고 링크로 만들지 않음) */
+export function safeUrl(raw: string): string {
+  const u = parseHttps(raw);
+  return u && u.length <= LIMITS.foodUrl ? u : "";
+}
+
+/** 입력칸의 주소에 문제가 있으면 이유 (비어 있으면 문제 없음). 문제가 있으면 저장하지 않는다. */
 export function urlProblem(raw: string): string | null {
   if (!raw.trim()) return null;
-  return safeUrl(raw) ? null : "https:// 로 시작하는 주소만 넣을 수 있어요.";
+  const u = parseHttps(raw);
+  if (!u) return "https:// 로 시작하는 주소만 넣을 수 있어요.";
+  if (u.length > LIMITS.foodUrl) return `주소가 너무 길어요 (${LIMITS.foodUrl}자까지). 주문 화면의 짧은 주소를 넣어 주세요.`;
+  return null;
 }
 
 /** 입력 내용을 저장할 모양으로 정리: 빈 칸 제거, 길이 제한, 개수 제한 */
@@ -75,7 +84,7 @@ export function hasContent(c: Pick<HardDayCard, "foods" | "people" | "message">)
 
 export type LoadResult =
   | { status: "empty" }
-  | { status: "ok"; card: HardDayCard }
+  | { status: "ok"; card: HardDayCard; raw: string }
   | { status: "broken" } // 저장된 값이 손상됐거나 모르는 버전
   | { status: "unavailable" }; // 이 브라우저에서 저장소를 쓸 수 없음 (사생활 보호 모드 등)
 
@@ -101,7 +110,7 @@ export function parseStored(raw: string | null): LoadResult {
   }));
   const people = (d.people as unknown[]).filter((p): p is string => typeof p === "string");
   const card = normalize({ foods, people, message: d.message }, new Date(savedAt));
-  return { status: "ok", card: { ...card, savedAt } };
+  return { status: "ok", card: { ...card, savedAt }, raw };
 }
 
 /** 최소한의 저장소 모양 (시험에서 가짜로 바꿀 수 있게) */
@@ -120,15 +129,44 @@ export function loadCard(store: KeyValueStore | null): LoadResult {
   }
 }
 
-/** 저장하고, 다시 읽어 같은지 확인한다. 확인될 때만 성공. */
-export function saveCard(store: KeyValueStore | null, card: HardDayCard): boolean {
-  if (!store) return false;
+/** 지금 저장소에 있는 원본 문자열. 읽을 수 없으면 undefined */
+export function readRaw(store: KeyValueStore | null): string | null | undefined {
+  if (!store) return undefined;
+  try {
+    return store.getItem(STORAGE_KEY);
+  } catch {
+    return undefined;
+  }
+}
+
+export type SaveResult =
+  | { status: "saved"; raw: string }
+  /** 이 화면이 읽은 뒤 다른 창(탭)에서 카드가 지워지거나 바뀜. 덮어쓰지 않았다. */
+  | { status: "conflict" }
+  /** 저장소를 못 쓰거나 용량 초과 등. 저장되지 않았다. */
+  | { status: "failed" };
+
+/**
+ * 저장하고, 다시 읽어 같은지 확인한다. 확인될 때만 성공.
+ * expectedRaw: 이 화면이 마지막으로 본 원본 (없었으면 null). 지금 저장소 값이 이것과 다르면 저장하지 않는다
+ * (다른 창에서 지운 카드를 되살리거나, 다른 창에서 고친 카드를 덮어쓰지 않도록). force면 확인 없이 저장.
+ */
+export function saveCard(
+  store: KeyValueStore | null,
+  card: HardDayCard,
+  expectedRaw: string | null,
+  force = false,
+): SaveResult {
+  if (!store) return { status: "failed" };
+  const current = readRaw(store);
+  if (current === undefined) return { status: "failed" };
+  if (!force && current !== expectedRaw) return { status: "conflict" };
   try {
     const text = JSON.stringify(card);
     store.setItem(STORAGE_KEY, text);
-    return store.getItem(STORAGE_KEY) === text;
+    return store.getItem(STORAGE_KEY) === text ? { status: "saved", raw: text } : { status: "failed" };
   } catch {
-    return false;
+    return { status: "failed" };
   }
 }
 
@@ -143,14 +181,13 @@ export function clearCard(store: KeyValueStore | null): boolean {
   }
 }
 
-/** 브라우저 저장소. 쓸 수 없으면 null (접근만 해도 오류가 나는 브라우저가 있다) */
+/**
+ * 브라우저 저장소. 접근만 해도 오류가 나는 브라우저(사생활 보호 모드 등)면 null.
+ * 미리 써 보는 시험은 하지 않는다: 읽기·저장·지우기 결과를 각각 따로 다룬다 (읽기만 되는 경우에도 기존 카드를 보여 줌).
+ */
 export function browserStore(): KeyValueStore | null {
   try {
-    const s = window.localStorage;
-    const probe = "404blue.probe";
-    s.setItem(probe, "1");
-    s.removeItem(probe);
-    return s;
+    return window.localStorage ?? null;
   } catch {
     return null;
   }
