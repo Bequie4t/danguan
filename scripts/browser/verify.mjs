@@ -561,13 +561,21 @@ try {
       await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
       await page.goto(`${base}/?screen=help`);
       await page.locator('[data-help-number="109"]').waitFor();
-      const r = await page.evaluate(() => ({
+      const measure = () => page.evaluate(() => ({
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         cut: [...document.querySelectorAll("[data-help-number]")].filter((a) => a.scrollWidth > a.clientWidth + 1).map((a) => a.dataset.helpNumber),
+        smallest: Math.min(...[...document.querySelectorAll("[data-help-number] span")].filter((s) => /^[0-9-]+$/.test(s.textContent.trim())).map((s) => parseFloat(getComputedStyle(s).fontSize))),
       }));
+      const r = await measure();
+      // 설치된 글꼴에 따라 폭이 달라지므로, 일부러 넓은 글꼴로도 확인한다 (CI 기기에서 잘렸던 경우)
+      await page.addStyleTag({ content: '[data-help-number] span { font-family: "DejaVu Sans Mono", "Courier New", monospace !important; letter-spacing: 0.06em !important; }' });
+      const wide = await measure();
       await page.setViewportSize(vp);
       assert.ok(r.overflow <= 0, `가로로 ${r.overflow}px 넘침`);
-      assert.deepEqual(r.cut, [], "카드 안에서 잘린 번호");
+      assert.deepEqual(r.cut, [], "카드 밖으로 넘친 내용(번호·이름)");
+      assert.ok(wide.overflow <= 0, `넓은 글꼴에서 가로로 ${wide.overflow}px 넘침`);
+      assert.deepEqual(wide.cut, [], "넓은 글꼴에서 카드 밖으로 넘친 내용(번호·이름)");
+      assert.ok(r.smallest >= 16, `번호 글씨가 너무 작아짐: ${r.smallest}px`);
     });
 
     await scenario("도움 화면: 키보드 Tab으로 109부터 차례로 이동", async () => {

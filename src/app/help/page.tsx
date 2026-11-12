@@ -26,36 +26,37 @@ function CallCard({ contact, kind }: { contact: HelpContact; kind: "primary" | "
       : kind === "secondary"
         ? "bg-tint-sky text-fg p-4 min-[340px]:p-5"
         : "border border-line bg-surface text-fg p-4";
-  // 좁은 화면(200% 확대 등)에서도 번호가 잘리지 않게 화면 폭에 따라 조금 줄인다. 109는 항상 가장 크다.
+  // 좁은 화면(200% 확대 등)·다른 글꼴에서도 번호가 잘리지 않게, 카드 폭(cqw)에 맞춰 줄인다. 109는 항상 가장 크다.
   const numberSize =
     kind === "primary"
-      ? "text-[clamp(2.5rem,14vw,3rem)]"
+      ? "text-[clamp(1.75rem,26cqw,3rem)]"
       : kind === "secondary"
-        ? "text-[clamp(1.25rem,8vw,1.875rem)]"
-        : "text-[clamp(1.5rem,8vw,1.875rem)]";
+        ? "text-[clamp(1rem,11cqw,1.875rem)]"
+        : "text-[clamp(1rem,22cqw,1.875rem)]";
   const detailColor = kind === "primary" ? "text-help-strong-fg/85" : "text-muted";
   return (
     <a
       href={`tel:${contact.tel}`}
       aria-label={`${contact.name} ${contact.number}로 전화 걸기. ${contact.detail}`}
       data-help-number={contact.number}
-      className={`flex h-full min-h-14 rounded no-underline ${look} ${focusRing} ${
+      className={`@container flex h-full min-h-14 rounded no-underline ${look} ${focusRing} ${
         kind === "plain" ? "flex-col gap-1.5" : "flex-wrap items-center justify-between gap-x-4 gap-y-2"
       }`}
     >
       {kind === "plain" ? (
         <>
-          <span className={`font-label font-medium leading-none tracking-wide ${numberSize}`}>{contact.number}</span>
-          <span className="font-semibold">{contact.name}</span>
-          <span className={`text-sm leading-relaxed ${detailColor}`}>{contact.detail}</span>
+          <span className={`font-label font-medium leading-none tracking-wide whitespace-nowrap ${numberSize}`}>{contact.number}</span>
+          <span className="font-semibold [overflow-wrap:anywhere]">{contact.name}</span>
+          <span className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
         </>
       ) : (
         <>
           <span className="flex min-w-0 flex-1 basis-48 flex-col gap-1">
-            <span className="text-base font-bold">{contact.name}</span>
-            <span className={`text-sm leading-relaxed ${detailColor}`}>{contact.detail}</span>
+            {/* 낱말 단위 줄바꿈을 지키되, 화면이 너무 좁을 때만 낱말 안에서도 줄을 바꾼다 (200% 확대) */}
+            <span className="text-base font-bold [overflow-wrap:anywhere]">{contact.name}</span>
+            <span className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
           </span>
-          <span className={`font-label font-medium leading-none tracking-wide ${numberSize}`}>{contact.number}</span>
+          <span className={`font-label font-medium leading-none tracking-wide whitespace-nowrap ${numberSize}`}>{contact.number}</span>
         </>
       )}
     </a>
