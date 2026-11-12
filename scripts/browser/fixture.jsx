@@ -52,6 +52,8 @@ export const fixture = {
   touch(id) { const r = rows.get(id); if (r) rows.set(id, { ...r, version: r.version + 1 }); },
   /** 다른 탭에서 지운 것처럼 기록을 없앤다 (시험 전용) */
   removeElsewhere(id) { rows.delete(id); },
+  /** 늦게 도착한 저장처럼 기록을 그대로 다시 넣는다 (시험 전용) */
+  putRow(row) { rows.set(row.id, { ...row }); },
   /** 다른 탭에서 메모·생활 항목을 더한 것처럼 고친다 (version 증가, 시험 전용) */
   editElsewhere(id, patch) { const r = rows.get(id); if (r) rows.set(id, { ...r, ...patch, version: r.version + 1 }); },
   /** 다른 곳에서 남긴 가상 기록을 더한다 (경험 시점 지정) */

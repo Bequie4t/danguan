@@ -84,7 +84,7 @@ type Status = "idle" | "saving" | "checking" | "saved" | "failed" | "missing";
 const PENDING_TEXT =
   "연결이 불안정해서 저장됐는지 확인하지 못했어요. 확인할 때까지 다른 값은 고를 수 없어요. ‘저장됐는지 확인하기’는 기록을 조회만 하고 새로 만들지 않아요.";
 const MISSING_TEXT =
-  "이 기록은 남아 있지 않아요. 저장되지 않았거나 다른 곳에서 지웠을 수 있어요. 다시 남기려면 새로 남겨 주세요.";
+  "아직 이 기록을 찾지 못했어요. 저장되지 않았거나 다른 곳에서 지웠을 수 있어요. 연결이 늦어 조금 뒤에 저장될 수도 있으니, 새로 남기기 전에 다시 확인해 볼 수 있어요.";
 
 function QuickCheckin() {
   const { uid, guard } = useAuthScope();
@@ -102,6 +102,8 @@ function QuickCheckin() {
   // 결과를 모르는 저장 요청. 다음에는 조회만 한다 (quickSave.ts 규칙 2).
   const pending = useRef<{ uid: string; params: CreateCheckinParams } | null>(null);
   const [hasPending, setHasPending] = useState(false);
+  // '찾지 못함'으로 확인된 요청. 새로 남기기 전에 같은 ID를 다시 조회만 할 수 있게 둔다.
+  const recheck = useRef<{ uid: string; params: CreateCheckinParams } | null>(null);
   // 방금 남긴 기록 되돌리기 상태 (어떤 기록에 대한 것인지 id로 묶는다)
   const [undo, setUndo] = useState<{ id: string; status: "working" | "done" | "failed" | "conflict" } | null>(null);
   // 가장 최근에 시작한 울이 조회만 반영한다
@@ -149,6 +151,7 @@ function QuickCheckin() {
         return;
       }
       setPending(null);
+      recheck.current = null;
       draftId.current = makeId();
       setSaved({ record: res.record, untouched: res.untouched });
       setStatus("saved");
@@ -157,10 +160,15 @@ function QuickCheckin() {
       return;
     }
     if (res.kind === "missing") {
-      // 저장되지 않았거나 다른 곳에서 지운 기록. 같은 ID로 다시 만들지 않는다.
+      // 저장되지 않았거나 다른 곳에서 지운 기록. 같은 ID로 다시 만들지 않는다(조회만 다시 할 수 있음).
       setPending(null);
+      recheck.current = { uid, params: res.sent };
       draftId.current = makeId();
       setStatus("missing");
+      // 울이가 이 기록을 따르고 있었다면 기본 모습으로 돌리고 남은 기록을 다시 조회한다 (되돌리기와 같음).
+      const goneId = res.sent.p_id;
+      setShown((cur) => (cur?.id === goneId ? null : cur));
+      loadLatest();
       return;
     }
     if (res.kind === "invalid") {
@@ -178,6 +186,7 @@ function QuickCheckin() {
   /** 새 기록 남기기. 결과를 모르는 요청이 있으면 하지 않는다. */
   async function save(b: Burden) {
     if (busy || pending.current) return;
+    recheck.current = null; // 새 기록을 남기기로 했으므로 앞선 요청은 더 확인하지 않는다
     setUndo(null);
     setPicked(b);
     setFailReason(null);
@@ -196,7 +205,8 @@ function QuickCheckin() {
 
   /** 결과를 모르는 요청이 저장됐는지 조회만 한다. */
   async function confirm() {
-    const prev = pending.current && pending.current.uid === uid ? pending.current.params : null;
+    const from = pending.current ?? recheck.current;
+    const prev = from && from.uid === uid ? from.params : null;
     if (!prev || busy) return;
     setFailReason(null);
     setStatus("checking");
@@ -332,13 +342,22 @@ function QuickCheckin() {
         {status === "missing" && picked && (
           <div role="alert" className="space-y-2 rounded bg-warn-soft p-3 text-warn">
             <p>{MISSING_TEXT}</p>
-            <button
-              type="button"
-              onClick={() => void save(picked)}
-              className="min-h-11 rounded-full border border-current px-4 font-semibold"
-            >
-              ‘{burdenLabel(picked)}’ 새로 남기기
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void confirm()}
+                className="min-h-11 rounded-full border border-current px-4 font-semibold"
+              >
+                다시 확인하기
+              </button>
+              <button
+                type="button"
+                onClick={() => void save(picked)}
+                className="min-h-11 rounded-full border border-current px-4 font-semibold"
+              >
+                ‘{burdenLabel(picked)}’ 새로 남기기
+              </button>
+            </div>
           </div>
         )}
         {failed && failReason && (
