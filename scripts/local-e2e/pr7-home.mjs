@@ -3,7 +3,7 @@
 // 안전장치: 브라우저 요청은 127.0.0.1/localhost만 허용하고 나머지는 막는다. 로컬 주소가 아니면 시작하지 않는다.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,12 @@ if (!isLocal(APP) || !isLocal(SB)) { console.error("로컬 주소가 아니어�
 const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
   ? await import(pathToFileURL(process.env.TEST_PLAYWRIGHT_MODULE).href)
   : await import("playwright");
+const modelTs = readFileSync(new URL("../../src/lib/checkins/model.ts", import.meta.url), "utf8");
+const CONSENT = {
+  key: modelTs.match(/CONSENT_KEY\s*=\s*"([^"]+)"/)?.[1],
+  version: modelTs.match(/CONSENT_POLICY_VERSION\s*=\s*"?([^";\n]+)"?/)?.[1],
+};
+if (!CONSENT.key || !CONSENT.version) { console.error("model.ts에서 동의 상수를 읽지 못했습니다."); process.exit(2); }
 const SHOTS = process.env.E2E_SHOTS_DIR ?? join(tmpdir(), "danguan-local-e2e-shots");
 mkdirSync(SHOTS, { recursive: true });
 
@@ -66,10 +72,17 @@ const other = createClient(SB, ANON, { auth: { persistSession: false } });
 let aId = null;
 
 /** 다음 create_checkin 한 번: 서버에 보낸 뒤 응답만 끊는다 (서버 저장됨) */
+const LOCAL_CREATE = `${new URL(SB).origin}/rest/v1/rpc/create_checkin`;
 async function loseNextCreateResponse(holder) {
   await page.route("**/rest/v1/rpc/create_checkin", async (route) => {
+    const u = new URL(route.request().url());
+    // 공통 차단 규칙보다 먼저 실행되므로 여기서 직접 확인: 정확한 로컬 DB 주소가 아니면 보내지 않는다
+    if (`${u.origin}${u.pathname}` !== LOCAL_CREATE) {
+      blocked.push(u.host);
+      return route.abort("blockedbyclient");
+    }
     holder.body = JSON.parse(route.request().postData() ?? "{}");
-    await route.fetch();
+    await route.fetch({ maxRedirects: 0 }); // 리다이렉트를 따라가지 않는다
     await route.abort("failed");
     await page.unroute("**/rest/v1/rpc/create_checkin");
   });
@@ -77,6 +90,8 @@ async function loseNextCreateResponse(holder) {
 /** 다음 create_checkin 한 번: 서버에 닿지 않게 끊는다 (아직 도착 안 한 요청) */
 async function dropNextCreate(holder) {
   await page.route("**/rest/v1/rpc/create_checkin", async (route) => {
+    const u = new URL(route.request().url());
+    if (`${u.origin}${u.pathname}` !== LOCAL_CREATE) blocked.push(u.host);
     holder.body = JSON.parse(route.request().postData() ?? "{}");
     await route.abort("failed");
     await page.unroute("**/rest/v1/rpc/create_checkin");
@@ -204,35 +219,54 @@ await step("8. 요청이 늦게 도착: 확인 시 없음 → 늦게 저장 → 
   ok(sql(`select count(*) from public.checkins where owner_id='${aId}' and burden='unsure'`) === "1", "기록이 1건이 아님");
 });
 
-await step("9. 다른 사람(B)은 A 기록을 볼 수 없음 (RLS) / A 홈 상태가 B로 넘어가지 않음", page, async () => {
+await step("9. B는 A 기록을 볼 수도 지울 수도 없음(RLS) / 같은 브라우저에서 B로 바꾸면 원래 탭이 B 기록을 보여 줌", page, async () => {
   const admin = createClient(SB, SERVICE, { auth: { persistSession: false } });
-  const { error } = await admin.auth.admin.createUser({ email: B.email, password: B.password, email_confirm: true });
-  ok(!error, `B 생성 실패: ${error?.message}`);
+  const { data: made, error } = await admin.auth.admin.createUser({ email: B.email, password: B.password, email_confirm: true });
+  ok(!error && made?.user?.id, `B 생성 실패: ${error?.message}`);
+  const bId = made.user.id;
   const b = createClient(SB, ANON, { auth: { persistSession: false } });
-  await b.auth.signInWithPassword(B);
-  const { data } = await b.from("checkins").select("id");
-  ok((data ?? []).length === 0, `B가 A 기록 ${data?.length}건을 봄`);
-  const { data: d2, error: e2 } = await b.rpc("delete_checkin", { p_id: h1.body.p_id, p_expected_version: 1 });
-  ok(e2 || d2?.status !== "ok", "B가 A 기록을 지움");
+  const { data: signed, error: se } = await b.auth.signInWithPassword(B);
+  ok(!se && signed?.session?.user?.id === bId, `B 로그인 실패: ${se?.message ?? "세션 없음"}`);
+  // 조회가 '성공'했고 0건인지 (오류를 0건으로 착각하지 않게)
+  const q1 = await b.from("checkins").select("id, owner_id");
+  ok(!q1.error && Array.isArray(q1.data), `B 조회 실패: ${q1.error?.message}`);
+  ok(q1.data.length === 0, `B가 기록 ${q1.data.length}건을 봄 (A 기록 노출)`);
+  const del = await b.rpc("delete_checkin", { p_id: h1.body.p_id, p_expected_version: 1 });
+  ok(!del.error && del.data?.status === "not_found", `B의 A 기록 삭제 시도 결과가 예상과 다름: ${del.error?.message ?? del.data?.status}`);
   ok(sql(`select count(*) from public.checkins where id='${h1.body.p_id}'`) === "1", "A 기록이 사라짐");
-  // 같은 브라우저에서 로그아웃 → B 로그인
+  // B의 가상 기록 하나 (동의 → 생성) — 조회가 실제로 동작하는지도 함께 확인
+  const consent = await b.from("consents").insert({ consent_key: CONSENT.key, policy_version: CONSENT.version });
+  ok(!consent.error, `B 동의 저장 실패: ${consent.error?.message}`);
+  const bRecordId = crypto.randomUUID();
+  const later = new Date(Date.now() + 60_000).toISOString();
+  const made2 = await b.rpc("create_checkin", { p_id: bRecordId, p_occurred_at: later, p_occurred_tz: "Asia/Seoul", p_recorded_at: later, p_recorded_tz: "Asia/Seoul", p_source: "direct", p_burden: "bearable", p_tags: [], p_note: "가상 B 기록 e2e" });
+  ok(!made2.error, `B 기록 생성 실패: ${made2.error?.message}`);
+  const q2 = await b.from("checkins").select("id, owner_id");
+  ok(!q2.error && q2.data.length === 1 && q2.data[0].id === bRecordId && q2.data[0].owner_id === bId, "B 조회가 B 기록 1건만 돌려주지 않음");
+  // 같은 브라우저의 다른 탭에서 로그아웃 → B 로그인
   const page2 = await ctx.newPage();
   await page2.goto(`${APP}/`).catch(() => {});
   await page2.waitForLoadState("networkidle").catch(() => {});
   const out = page2.getByRole("button", { name: /로그아웃/ });
-  if (await out.count()) await out.first().click();
-  else await page2.goto(`${APP}/auth/signout`).catch(() => {});
+  ok((await out.count()) > 0, "로그아웃 버튼 없음");
+  await out.first().click();
   await page2.waitForURL(/\/login/).catch(() => {});
   await page2.goto(`${APP}/login`).catch(() => {});
   await page2.getByLabel("이메일").fill(B.email);
   await page2.getByLabel("비밀번호").fill(B.password);
   await page2.getByRole("button", { name: "로그인", exact: true }).last().click();
-  await page2.waitForURL(/\/consent|\/$/);
+  await page2.waitForURL((u) => !u.pathname.startsWith("/login"));
+  // 원래 탭: A의 상태가 사라지고 B의 기록을 따르는지
   await page.bringToFront();
   await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
-  await page.waitForFunction(() => !document.body.innerText.includes("남겨 뒀어요"), null, { timeout: 15000 });
-  ok(!(await page.locator("body").innerText()).includes("모르겠어요 ·"), "A의 저장 안내가 남음");
+  await page.getByText("다른 계정으로 바뀌어서", { exact: false }).waitFor();
+  ok(!(await page.locator("body").innerText()).includes("남겨 뒀어요"), "A의 저장 안내가 남음");
+  await waitUli("그럭저럭"); // B의 가상 기록(견딜 만해요)
   await page.screenshot({ path: `${SHOTS}/${String(++shot).padStart(2, "0")}-after-switch.png` });
+  // 원래 탭의 내 기록: B 기록만
+  await page.goto(`${APP}/records`);
+  await page.getByText("가상 B 기록 e2e", { exact: true }).waitFor();
+  ok((await page.getByText("가상 다른 탭 메모", { exact: false }).count()) === 0, "원래 탭 내 기록에 A 기록이 보임");
   await page2.close();
 });
 
