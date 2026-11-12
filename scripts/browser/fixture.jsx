@@ -10,6 +10,7 @@ import HomeCheckin from "../../src/components/HomeCheckin";
 import HelpPage from "../../src/app/help/page";
 import HeaderNav from "../../src/components/HeaderNav";
 import AskPage from "../../src/app/ask/page";
+import BookingPage from "../../src/app/booking/page";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -80,6 +81,8 @@ export const fixture = {
     if (screen === "today-nav") { root.render(<><HeaderNav /><AuthScope><Probe /><React.Fragment key={++screenGeneration}><CheckinForm /></React.Fragment></AuthScope></>); return; }
     // 부탁하기도 로그인·저장과 무관: AuthScope 없이 렌더한다.
     if (screen === "ask") { root.render(<React.Fragment key={++screenGeneration}><AskPage /></React.Fragment>); return; }
+    // 예약 대본도 로그인·저장과 무관
+    if (screen === "booking") { root.render(<React.Fragment key={++screenGeneration}><BookingPage /></React.Fragment>); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {

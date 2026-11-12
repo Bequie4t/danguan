@@ -824,6 +824,132 @@ try {
       assert.ok(overflow <= 0, `가로로 ${overflow}px 넘침`);
     });
 
+    // ── 예약 대본 (5단계): 읽기만 하면 되는 대본, 앱이 대신 연락하지 않음 ──
+    const openBooking = async () => {
+      await page.goto(`${base}/?screen=booking`);
+      await page.getByRole("heading", { name: /병원 예약 대본/ }).waitFor();
+    };
+    const stepIds = () => page.locator("[data-step]").evaluateAll((els) => els.map((e) => e.dataset.step));
+    const scriptText = () => page.locator("ol").innerText();
+
+    await scenario("예약 대본: 고른 것대로 전화 대본, 글씨 크게, 걱정 풀기 출처, 저장·네트워크 없음", async () => {
+      const requests = [];
+      const onReq = (r) => requests.push(r.url());
+      page.on("request", onReq);
+      await openBooking();
+      const before = await page.evaluate(() => ({ ls: localStorage.length, ss: sessionStorage.length }));
+      requests.length = 0;
+      assert.deepEqual(await stepIds(), ["hello", "visit", "when", "close"]);
+      assert.match(await scriptText(), /이 병원은 처음이에요/);
+      assert.match(await scriptText(), /가장 빠른 날이 언제인지/);
+      await page.getByRole("radio", { name: "다닌 적 있어요" }).check();
+      await page.getByLabel("원하는 때 (선택)").fill("이번 주 목요일 오후");
+      await page.getByRole("checkbox", { name: "첫 진료 비용이 대략 얼마인지" }).check();
+      assert.deepEqual(await stepIds(), ["hello", "visit", "when", "ask", "close"]);
+      const t = await scriptText();
+      assert.ok(t.includes("전에 다닌 적이 있어요") && t.includes("이번 주 목요일 오후에 예약할 수 있을까요?") && t.includes("첫 진료 때 비용이"));
+      // 글씨 크게
+      const size = () => page.locator('[data-step="hello"] p').nth(1).evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
+      const small = await size();
+      await page.getByRole("checkbox", { name: "글씨 크게" }).check();
+      assert.ok((await size()) > small + 4, "글씨 크게가 동작하지 않음");
+      // 걱정 풀기: 펼치면 근거 링크
+      await page.locator('[data-worry="record"] summary').click();
+      assert.equal(await page.locator('[data-worry="record"] a[href^="https://www.law.go.kr/"][target="_blank"][rel~="noopener"]').count(), 1);
+      assert.ok((await page.locator("#root").innerText()).includes("2026년 11월 13일에 확인한 내용"));
+      // 연결: 부탁하기·상담전화. 병원 전화 걸기·번호 입력 없음
+      assert.equal(await page.locator('main a[href="/ask"]').count(), 1);
+      assert.deepEqual(await page.locator('a[href^="tel:"]').evaluateAll((els) => els.map((e) => e.getAttribute("href"))), ["tel:15770199"]);
+      assert.equal(await page.locator('input[type="tel"]').count(), 0);
+      const after = await page.evaluate(() => ({ ls: localStorage.length, ss: sessionStorage.length }));
+      page.off("request", onReq);
+      assert.deepEqual(after, before, "브라우저 저장소에 쓰지 않음");
+      assert.deepEqual(requests, [], "예약 대본 화면에서 네트워크 요청 없음");
+      await page.getByRole("button", { name: "입력 지우고 처음부터" }).click();
+      assert.equal(await page.getByLabel("원하는 때 (선택)").inputValue(), "");
+      assert.deepEqual(await stepIds(), ["hello", "visit", "when", "close"]);
+    });
+
+    await scenario("예약 대본: 글로 문의 → 고친 글 유지 → '처음 글로' → 복사는 '보냈어요·예약했어요'라고 하지 않음", async () => {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+      await openBooking();
+      await page.getByRole("radio", { name: /글로/ }).check();
+      const box = page.getByRole("textbox", { name: "예약 문의 글" });
+      assert.equal(await box.inputValue(), "안녕하세요, 진료 예약 문의드려요. 이 병원은 처음이에요. 가장 빠른 날이 언제인지 알 수 있을까요? 감사합니다.");
+      await box.fill("가상 직접 쓴 문의");
+      await page.getByRole("checkbox", { name: "가져갈 것이 있는지" }).check();
+      assert.equal(await box.inputValue(), "가상 직접 쓴 문의");
+      await page.getByRole("button", { name: "처음 글로" }).click();
+      assert.match(await box.inputValue(), /가져가야 할 것이 있을까요\?/);
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.getByText("복사했어요.", { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), await box.inputValue());
+      const text = await page.locator("#root").innerText();
+      assert.ok(!/보냈어요|예약했어요|예약 완료|전송 완료/.test(text));
+      await context.clearPermissions();
+    });
+
+    await scenario("예약 대본: 복사 중 글을 고치면 이전 글 결과를 표시하지 않음, 빈 글이면 복사 버튼 꺼짐", async () => {
+      await openBooking();
+      await page.getByRole("radio", { name: /글로/ }).check();
+      const box = page.getByRole("textbox", { name: "예약 문의 글" });
+      await page.evaluate(() => {
+        window.__clip = [];
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((r) => { window.__clip.push({ t, r }); }) } });
+      });
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await box.fill("가상 B 문의");
+      await page.evaluate(() => window.__clip[0].r());
+      await page.waitForTimeout(200);
+      assert.equal(await page.getByText("복사했어요.", { exact: false }).count(), 0, "바뀐 글에 '복사했어요'가 뜸");
+      await box.fill("  ");
+      assert.equal(await page.getByRole("button", { name: "복사하기" }).isDisabled(), true);
+      await page.getByText("보낼 글이 비어 있어요", { exact: false }).waitFor();
+    });
+
+    await scenario("예약 대본: 키보드로 고르기·펼치기, 초점 표시, 누르는 영역 44px", async () => {
+      await openBooking();
+      await page.getByRole("radio", { name: "전화로" }).focus();
+      await page.keyboard.press("ArrowRight");
+      assert.equal(await page.getByRole("radio", { name: /글로/ }).isChecked(), true, "화살표로 방법 바꾸기");
+      await page.getByRole("radio", { name: /글로/ }).focus();
+      await page.keyboard.press("ArrowLeft");
+      const sum = page.locator('[data-worry="insurance"] summary');
+      await sum.focus();
+      assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle), "none", "키보드 초점 표시 없음");
+      await page.keyboard.press("Enter");
+      assert.equal(await page.locator('[data-worry="insurance"]').evaluate((d) => d.open), true, "Enter로 펼쳐지지 않음");
+      const small = await page.locator("main input, main textarea, main button, main a, main summary").evaluateAll((els) => els.map((e) => { const l = e.closest("label") ?? e; const r = l.getBoundingClientRect(); return { t: (e.textContent || e.getAttribute("type") || e.tagName).trim().slice(0, 12), h: r.height }; }).filter((x) => x.h < 44));
+      assert.deepEqual(small, [], "누르는 영역이 44px보다 작음");
+    });
+
+    for (const scheme of ["light", "dark"]) {
+      await scenario(`예약 대본: ${scheme === "dark" ? "어두운" : "밝은"} 화면 글씨 대비 4.5:1 이상 (대본·걱정 풀기 펼친 상태)`, async () => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await openBooking();
+        await page.getByRole("checkbox", { name: "첫 진료 비용이 대략 얼마인지" }).check();
+        for (const id of ["cost", "record", "insurance"]) await page.locator(`[data-worry="${id}"] summary`).click();
+        const low = (await helpContrast(askSel + ", main summary, main h3, main ol p, main li")).filter((x) => x.ratio < 4.5);
+        await page.getByRole("radio", { name: /글로/ }).check();
+        const low2 = (await helpContrast(askSel)).filter((x) => x.ratio < 4.5);
+        await page.emulateMedia({ colorScheme: "light" });
+        assert.deepEqual([...low, ...low2], [], "글씨 대비 4.5:1 미만");
+      });
+    }
+
+    await scenario("예약 대본: 200% 확대(폭 절반)·글씨 크게에서도 가로로 넘치지 않음", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await openBooking();
+      await page.getByLabel("원하는 때 (선택)").fill("가".repeat(30));
+      for (const a of ["첫 진료 비용이 대략 얼마인지", "진료가 얼마나 걸리는지", "가져갈 것이 있는지"]) await page.getByRole("checkbox", { name: a }).check();
+      await page.getByRole("checkbox", { name: "글씨 크게" }).check();
+      for (const id of ["cost", "record", "insurance"]) await page.locator(`[data-worry="${id}"] summary`).click();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.setViewportSize(vp);
+      assert.ok(overflow <= 0, `가로로 ${overflow}px 넘침`);
+    });
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
