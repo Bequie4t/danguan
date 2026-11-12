@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Gothic_A1, Jost } from "next/font/google";
 import AccountMenu from "@/components/AccountMenu";
+import HeaderNav, { HomeLink } from "@/components/HeaderNav";
 import QuietBoundary from "@/components/QuietBoundary";
 import "./globals.css";
 
@@ -39,24 +40,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-surface focus:px-3 focus:py-2">
           본문으로 건너뛰기
         </a>
-        {/* 머리글 링크는 일반 <a>로 둔다. next/link는 다른 화면(홈)의 코드 묶음을 함께 참조해, 도움 화면이 홈·로그인 코드를
-            내려받게 만든다. 도움 화면은 그 코드 없이 열려야 한다 (scripts/browser/help-real.mjs로 확인). */}
+        {/* 머리글 링크는 일반 <a>로 둔다 (HeaderNav). next/link는 다른 화면(홈)의 코드 묶음을 함께 참조해, 도움 화면이 홈·로그인
+            코드를 내려받게 만든다 (scripts/browser/help-real.mjs로 확인). 지금 화면의 링크는 다시 눌러도 새로 열지 않는다. */}
         <header className="sticky top-0 z-40 border-b border-line bg-bg/95 backdrop-blur">
           <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3">
-            <a href="/" className="flex flex-col leading-tight" aria-label="404 blue 홈">
+            <HomeLink>
               <span className="font-label text-xl font-medium tracking-wide">
                 404 <span className="text-brand">blue</span>
               </span>
               <span className="text-[0.625rem] tracking-wider text-muted">당신의 우울은 안녕하신가요</span>
-            </a>
-            <nav aria-label="주요 화면" className="flex items-center gap-1 text-[0.95rem]">
-              <a href="/today" className="rounded-lg px-2.5 py-2 hover:bg-accent-soft">
-                오늘 기록
-              </a>
-              <a href="/records" className="rounded-lg px-2.5 py-2 hover:bg-accent-soft">
-                내 기록
-              </a>
-            </nav>
+            </HomeLink>
+            <HeaderNav />
             <div className="ml-auto flex items-center gap-2">
               {/* 계정 메뉴가 오류를 내도 머리글·도움 버튼·본문은 그대로 (도움 화면에서는 계정 메뉴가 아무것도 하지 않음) */}
               <QuietBoundary>

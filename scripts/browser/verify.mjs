@@ -20,7 +20,10 @@ await build({
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
-    b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: 'import React from "react"; export default function Link({children,...props}) { return React.createElement("a",props,children); }', loader: "js", resolveDir: root }));
+    b.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: "navigation", namespace: "fixture" }));
+    b.onLoad({ filter: /^link$/, namespace: "fixture" }, () => ({ contents: 'import React from "react"; export default function Link({children,...props}) { return React.createElement("a",props,children); }', loader: "js", resolveDir: root }));
+    // 머리글 시험용: 지금 주소를 그대로 돌려준다
+    b.onLoad({ filter: /^navigation$/, namespace: "fixture" }, () => ({ contents: "export function usePathname() { return location.pathname; }", loader: "js", resolveDir: root }));
   } }],
 });
 const js = await readFile(resolve(work, "fixture.js"));
@@ -588,6 +591,33 @@ try {
       assert.deepEqual(order, ["109", "1577-0199", "119", "112"]);
       const ring = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
       assert.notEqual(ring, "none", "키보드 초점 표시 없음");
+    });
+
+    await scenario("머리글: 기록 작성 중 지금 화면 메뉴('오늘 기록')를 다시 눌러도 새로 열지 않고 입력 유지", async () => {
+      await page.goto(`${base}/today?screen=today-nav`);
+      await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+      await prepare("가상 작성 중 메모");
+      await page.evaluate(() => { window.__noReload = true; });
+      const today = page.getByRole("link", { name: "오늘 기록", exact: true });
+      assert.equal(await today.getAttribute("aria-current"), "page");
+      assert.equal(await page.getByRole("link", { name: "내 기록", exact: true }).getAttribute("aria-current"), null);
+      await page.evaluate(() => window.scrollTo(0, 400));
+      await today.click();
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => window.__noReload === true), true, "화면이 새로 열림");
+      assert.equal(new URL(page.url()).pathname, "/today");
+      assert.equal(await page.locator("#note").inputValue(), "가상 작성 중 메모", "작성 중 메모가 사라짐");
+      assert.equal(await page.getByRole("button", { name: "버거워요", exact: true }).getAttribute("aria-pressed"), "true", "고른 버거움이 사라짐");
+      // 키보드(Enter)로 눌러도 같음
+      await today.focus();
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => window.__noReload === true), true, "Enter로 화면이 새로 열림");
+      assert.equal(await page.locator("#note").inputValue(), "가상 작성 중 메모");
+      // 다른 화면 링크는 그대로 이동
+      await page.getByRole("link", { name: "내 기록", exact: true }).click();
+      await page.waitForURL(/\/records(\?|$)/);
+      assert.equal(await page.evaluate(() => window.__noReload === true), false);
     });
 
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {

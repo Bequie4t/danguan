@@ -270,6 +270,28 @@ await step("9. B는 A 기록을 볼 수도 지울 수도 없음(RLS) / 같은 �
   await page2.close();
 });
 
+await step("9b. 오늘 기록 작성 중 머리글 '오늘 기록'을 다시 눌러도 새로 열지 않고 입력 유지, 저장 요청 없음", page, async () => {
+  await page.bringToFront();
+  await page.goto(`${APP}/today`);
+  await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+  await page.getByRole("button", { name: "선택 사항 더하기", exact: false }).click();
+  await page.getByRole("button", { name: "버거워요", exact: true }).click();
+  await page.locator("#note").fill("가상 작성 중 메모 e2e");
+  await page.evaluate(() => { window.__noReload = true; });
+  const before = creates;
+  const today = page.getByRole("banner").getByRole("link", { name: "오늘 기록", exact: true });
+  await today.click();
+  await page.waitForTimeout(800);
+  ok(await page.evaluate(() => window.__noReload === true), "화면이 새로 열림");
+  ok((await page.locator("#note").inputValue()) === "가상 작성 중 메모 e2e", "작성 중 메모가 사라짐");
+  ok((await page.getByRole("button", { name: "버거워요", exact: true }).getAttribute("aria-pressed")) === "true", "고른 버거움이 사라짐");
+  ok(creates === before, "저장 요청이 나감");
+  ok((await page.getByRole("banner").getByRole("link", { name: "오늘 기록", exact: true }).getAttribute("aria-current")) === "page", "지금 화면 표시(aria-current) 없음");
+  // 다른 화면 메뉴는 그대로 이동
+  await page.getByRole("banner").getByRole("link", { name: "내 기록", exact: true }).click();
+  await page.waitForURL(/\/records/);
+});
+
 await step("10. 로컬 밖으로 나간 요청 없음", null, async () => {
   ok(blocked.length === 0, `막은 외부 요청: ${[...new Set(blocked)].join(", ")}`);
 });
