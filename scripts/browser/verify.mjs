@@ -977,6 +977,147 @@ try {
       assert.ok(overflow <= 0, `가로로 ${overflow}px 넘침`);
     });
 
+    // ── 힘든 날 카드 (6단계): 이 기기에만 저장, 서버로 보내지 않음 ──
+    const HD_KEY = "404blue.hardday.v1";
+    const openHard = async () => {
+      await page.goto(`${base}/?screen=hardday`);
+      await page.getByRole("heading", { name: "힘든 날 카드", exact: true }).waitFor();
+    };
+    const hdStored = () => page.evaluate((k) => localStorage.getItem(k), HD_KEY);
+    const fillHard = async () => {
+      await page.getByLabel("먹을 것 1").fill("가상 동네 죽집 소고기죽");
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/order");
+      await page.getByLabel("먼저 부탁할 사람").fill("민지");
+      await page.getByRole("button", { name: "사람 더하기" }).click();
+      await page.getByLabel("그다음 사람").fill("지훈");
+    };
+
+    await scenario("힘든 날 카드: 적고 저장 → 새로 열어도 그대로 → 복사 → 고치기 → 지우기(확인)까지, 서버 요청 없음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      const requests = [];
+      const onReq = (r) => { if (!/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(r.url())) requests.push(r.url()); };
+      page.on("request", onReq);
+      await openHard();
+      assert.equal(await hdStored(), null);
+      await fillHard();
+      // 잘못된 주소면 저장 버튼이 꺼지고 이유를 보여 준다
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("javascript:alert(1)");
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.getByText("https:// 로 시작하는 주소만", { exact: false }).waitFor();
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/order");
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const stored = JSON.parse(await hdStored());
+      assert.deepEqual(stored.people, ["민지", "지훈"]);
+      assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), [HD_KEY], "정해진 키 하나만");
+      // 새로 열어도 카드가 보임 (이 기기 저장)
+      await openHard();
+      await page.getByRole("heading", { name: "먹을 것", exact: true }).waitFor();
+      const order = page.getByRole("link", { name: "주문 화면 열기 (새 창)" });
+      assert.equal(await order.getAttribute("href"), "https://example.test/order");
+      assert.equal(await order.getAttribute("target"), "_blank");
+      assert.match(await order.getAttribute("rel"), /noopener/);
+      assert.ok((await page.locator("#root").innerText()).includes("먼저 민지에게, 어렵다면 지훈에게"));
+      assert.ok((await page.locator("#root").innerText()).includes("지훈에게 같은 문장을 보내 봐요"));
+      assert.equal(await page.locator('main a[href="/help"]').count(), 1);
+      // 복사: '보냈어요'라고 하지 않음
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+      await page.getByRole("button", { name: "문장 복사하기" }).click();
+      await page.getByText("복사했어요.", { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), stored.message);
+      assert.ok(!/보냈어요|전송 완료/.test(await page.locator("#root").innerText()));
+      await context.clearPermissions();
+      // 고치기 → 돌아가기
+      await page.getByRole("button", { name: "카드 고치기" }).click();
+      assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽");
+      await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).click();
+      // 지우기: 확인을 거쳐야 지워짐, 취소하면 그대로
+      await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+      await page.getByRole("button", { name: "취소" }).click();
+      assert.notEqual(await hdStored(), null, "취소했는데 지워짐");
+      await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+      await page.getByRole("button", { name: "지우기", exact: true }).click();
+      await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor();
+      assert.equal(await hdStored(), null);
+      await openHard();
+      assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "", "지웠는데 남아 있음");
+      page.off("request", onReq);
+      assert.deepEqual(requests, [], "힘든 날 카드에서 서버 요청 없음");
+    });
+
+    await scenario("힘든 날 카드: 손상된 저장값·위험한 주소는 쓰지 않고, 저장소를 못 쓰면 '이번에만 보기'", async () => {
+      await page.goto(`${base}/?screen=form`);
+      await page.evaluate((k) => localStorage.setItem(k, "{망가진"), HD_KEY);
+      await openHard();
+      await page.getByText("저장된 카드를 읽을 수 없어서", { exact: false }).waitFor();
+      await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ version: 1, foods: [{ name: "가상 위험", url: "javascript:alert(1)" }], people: [], message: "가상", savedAt: "2026-11-13T00:00:00.000Z" })), HD_KEY);
+      await openHard();
+      await page.getByText("가상 위험", { exact: true }).waitFor();
+      assert.equal(await page.locator('a[href^="javascript:"]').count(), 0, "위험한 주소가 링크가 됨");
+      assert.equal(await page.getByRole("link", { name: "주문 화면 열기 (새 창)" }).count(), 0);
+      assert.ok((await page.locator("#root").innerText()).includes("부탁할 사람이 없다면"));
+      await page.evaluate(() => localStorage.clear());
+      // 저장소를 못 쓰는 브라우저 (사생활 보호 모드 등)
+      await page.evaluate(() => { Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new Error("SecurityError"); } }); });
+      await page.evaluate(() => window.__fixture.mount("hardday"));
+      await page.getByText("이 브라우저에서는 저장할 수 없어요 (사생활", { exact: false }).waitFor();
+      await fillHard();
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).click();
+      await page.getByText("저장되지 않은 카드예요", { exact: false }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "이 기기에서 지우기" }).count(), 0);
+    });
+
+    await scenario("힘든 날 카드: 키보드·초점·누르는 영역 44px (적기·보기)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      const smallOf = () => page.locator("main input, main textarea, main button, main a").evaluateAll((els) => els.filter((e) => !e.readOnly).map((e) => { const r = (e.closest("label") ?? e).getBoundingClientRect(); return { t: (e.textContent || e.getAttribute("aria-label") || e.id || e.tagName).trim().slice(0, 12), h: r.height }; }).filter((x) => x.h < 44));
+      assert.deepEqual(await smallOf(), [], "적기 화면: 누르는 영역이 44px보다 작음");
+      await page.getByLabel("먹을 것 1").focus();
+      assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle), "none", "초점 표시 없음");
+      await fillHard();
+      await page.getByLabel("먹을 것 1").focus();
+      await page.keyboard.press("Enter"); // 폼 제출 = 저장
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      assert.deepEqual(await smallOf(), [], "보기 화면: 누르는 영역이 44px보다 작음");
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    for (const scheme of ["light", "dark"]) {
+      await scenario(`힘든 날 카드: ${scheme === "dark" ? "어두운" : "밝은"} 화면 글씨 대비 4.5:1 이상 (적기·보기)`, async () => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+        await openHard();
+        await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("http://example.test");
+        const lowEdit = (await helpContrast(askSel + ", main legend, main strong")).filter((x) => x.ratio < 4.5);
+        await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("");
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        const lowView = (await helpContrast(askSel + ", main strong")).filter((x) => x.ratio < 4.5);
+        await page.evaluate(() => localStorage.clear());
+        await page.emulateMedia({ colorScheme: "light" });
+        assert.deepEqual([...lowEdit, ...lowView], [], "글씨 대비 4.5:1 미만");
+      });
+    }
+
+    await scenario("힘든 날 카드: 200% 확대(폭 절반)에서 가로로 넘치지 않음 (긴 이름·주소)", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      await page.getByLabel("먹을 것 1").fill("가".repeat(30));
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/" + "a".repeat(200));
+      await page.getByLabel("먼저 부탁할 사람").fill("나".repeat(20));
+      const o1 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const o2 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.evaluate(() => localStorage.clear());
+      await page.setViewportSize(vp);
+      assert.ok(o1 <= 0 && o2 <= 0, `가로로 넘침: 적기 ${o1}px, 보기 ${o2}px`);
+    });
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
