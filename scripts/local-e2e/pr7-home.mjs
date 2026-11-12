@@ -1,0 +1,223 @@
+// PR #7 실제 로그인·실제 DB 시험 (로컬 임시 Supabase + next start). 가상 계정·가상 데이터만.
+// 운영·테스트 Supabase 프로젝트에는 연결하지 않는다.
+import { execSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+const require = createRequire("/tmp/claude-0/-home-claude/fdd603a3-282f-5530-b028-8c4df4045bf9/scratchpad/gh/package.json");
+const { createClient } = require("@supabase/supabase-js");
+const { chromium } = await import("/opt/npm-tools/node_modules/playwright/index.mjs");
+
+const APP = "http://127.0.0.1:3000";
+const SB = "http://127.0.0.1:54321";
+const ANON = process.env.ANON;
+const SERVICE = process.env.SERVICE;
+const SHOTS = "/tmp/claude-0/-home-claude/fdd603a3-282f-5530-b028-8c4df4045bf9/scratchpad/e2e/shots";
+mkdirSync(SHOTS, { recursive: true });
+
+const tag = Date.now().toString(36);
+const A = { email: `local-a-${tag}@example.test`, password: randomBytes(12).toString("hex") };
+const B = { email: `local-b-${tag}@example.test`, password: randomBytes(12).toString("hex") };
+
+const sql = (q) => execSync(`docker exec supabase_db_localsb psql -U postgres -tA -F '|' -c "${q.replace(/"/g, '\\"')}"`).toString().trim();
+const results = [];
+let shot = 0;
+async function step(name, page, fn) {
+  try {
+    await fn();
+    results.push(["PASS", name]);
+    console.log("PASS", name);
+  } catch (e) {
+    results.push(["FAIL", name, String(e.message).split("\n")[0]]);
+    console.log("FAIL", name, "-", String(e.message).split("\n")[0]);
+  }
+  if (page) await page.screenshot({ path: `${SHOTS}/${String(++shot).padStart(2, "0")}.png`, fullPage: false }).catch(() => {});
+}
+const ok = (c, m) => { if (!c) throw new Error(m); };
+
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: "ko-KR", timezoneId: "Asia/Seoul" });
+const page = await ctx.newPage();
+page.setDefaultTimeout(15000);
+const uli = () => page.locator('section[aria-labelledby="home-question"] svg[role="img"]').first().getAttribute("aria-label");
+const waitUli = (word) => page.waitForFunction((w) => document.querySelector('section[aria-labelledby="home-question"] svg[role="img"]')?.getAttribute("aria-label")?.includes(w), word);
+const btn = (name) => page.getByRole("button", { name, exact: true });
+
+// '다른 탭/기기': 같은 계정으로 따로 로그인한 클라이언트가 실제 RPC를 부른다
+const other = createClient(SB, ANON, { auth: { persistSession: false } });
+let aId = null;
+
+/** 다음 create_checkin 한 번: 서버에 보낸 뒤 응답만 끊는다 (서버 저장됨) */
+async function loseNextCreateResponse(holder) {
+  await page.route("**/rest/v1/rpc/create_checkin", async (route) => {
+    holder.body = JSON.parse(route.request().postData() ?? "{}");
+    await route.fetch();
+    await route.abort("failed");
+    await page.unroute("**/rest/v1/rpc/create_checkin");
+  });
+}
+/** 다음 create_checkin 한 번: 서버에 닿지 않게 끊는다 (아직 도착 안 한 요청) */
+async function dropNextCreate(holder) {
+  await page.route("**/rest/v1/rpc/create_checkin", async (route) => {
+    holder.body = JSON.parse(route.request().postData() ?? "{}");
+    await route.abort("failed");
+    await page.unroute("**/rest/v1/rpc/create_checkin");
+  });
+}
+let creates = 0;
+page.on("request", (r) => { if (r.url().includes("/rpc/create_checkin")) creates++; });
+
+await step("0. 도움 화면은 로그인 없이 열림", page, async () => {
+  await page.goto(`${APP}/help`);
+  await page.getByRole("heading").first().waitFor();
+  ok(page.url().endsWith("/help"), "도움 화면이 다른 곳으로 이동함");
+});
+
+await step("1. 가상 계정 A 가입 → 동의 → 홈", page, async () => {
+  await page.goto(`${APP}/login`);
+  await page.getByRole("button", { name: /계정 만들기/ }).first().click();
+  await page.getByLabel("이메일").fill(A.email);
+  await page.getByLabel("비밀번호").fill(A.password);
+  await page.getByRole("button", { name: "계정 만들기", exact: true }).click();
+  await page.waitForURL(/\/consent/);
+  await page.locator("#consent-check").check();
+  await page.getByRole("button", { name: "동의하고 계속하기", exact: true }).click();
+  await page.waitForURL((u) => !u.pathname.startsWith("/consent"));
+  await page.goto(`${APP}/`);
+  await page.getByRole("heading", { name: "지금 얼마나 버거워요?" }).waitFor();
+  aId = sql(`select id from auth.users where email='${A.email}'`);
+  ok(aId, "A 계정이 DB에 없음");
+  await waitUli("조용히");
+});
+
+await step("2. 한 번 누르면 서버 확인 뒤 '남겨 뒀어요', DB에 A 소유 1건(version 1, 메모·태그 없음)", page, async () => {
+  await btn("버거워요").click();
+  await page.getByText("남겨 뒀어요", { exact: false }).waitFor();
+  await waitUli("무겁게");
+  const rows = sql(`select burden, version, coalesce(note,'-'), array_length(tags,1) from public.checkins where owner_id='${aId}'`).split("\n").filter(Boolean);
+  ok(rows.length === 1, `기록 ${rows.length}건`);
+  ok(rows[0] === "heavy|1|-|", `값이 다름: ${rows[0]}`);
+});
+
+await step("3. 되돌리기 → DB에서 삭제, 울이 기본 모습", page, async () => {
+  await btn("되돌리기").click();
+  await page.getByText("되돌렸어요", { exact: false }).waitFor();
+  await waitUli("조용히");
+  ok(sql(`select count(*) from public.checkins where owner_id='${aId}'`) === "0", "기록이 남아 있음");
+});
+
+await step("4. 새로고침해도 울이는 DB의 최근 기록을 따름", page, async () => {
+  await btn("괜찮은 편이에요").click();
+  await page.getByText("남겨 뒀어요", { exact: false }).waitFor();
+  await page.reload();
+  await waitUli("가볍게");
+});
+
+const h1 = {};
+await step("5. 응답 유실 → '저장됐는지 확인하기'만, 다른 값 잠김 → 확인은 조회만, 1건", page, async () => {
+  await loseNextCreateResponse(h1);
+  const before = creates;
+  await btn("견딜 만해요").click();
+  await btn("저장됐는지 확인하기").waitFor();
+  ok(await btn("많이 버거워요").isDisabled(), "다른 값 버튼이 잠기지 않음");
+  ok((await btn("다시 남기기").count()) === 0, "결과를 모를 때 '다시 남기기'가 보임");
+  ok(sql(`select count(*) from public.checkins where id='${h1.body.p_id}'`) === "1", "서버에 저장되지 않음(시험 준비 실패)");
+  await btn("저장됐는지 확인하기").click();
+  await page.getByText("남겨 뒀어요", { exact: false }).waitFor();
+  ok((await btn("되돌리기").count()) === 1, "손대지 않은 기록인데 되돌리기 없음");
+  ok(creates - before === 1, `생성 요청 ${creates - before}번`);
+  ok(sql(`select count(*) from public.checkins where id='${h1.body.p_id}'`) === "1", "기록이 1건이 아님");
+});
+
+await step("6. 응답 유실 → 다른 탭에서 메모·태그 추가 → 확인: 덮어쓰지 않음, 되돌리기 없음", page, async () => {
+  const { error: se } = await other.auth.signInWithPassword(A);
+  ok(!se, "다른 탭 로그인 실패");
+  const h = {};
+  await loseNextCreateResponse(h);
+  const before = creates;
+  await btn("버거워요").click();
+  await btn("저장됐는지 확인하기").waitFor();
+  const { data, error } = await other.rpc("update_checkin", { p_id: h.body.p_id, p_expected_version: 1, p_burden: "heavy", p_tags: ["sleep", "meal"], p_note: "가상 다른 탭 메모" });
+  ok(!error && data?.status === "ok", `다른 탭 수정 실패: ${error?.message ?? data?.status}`);
+  await btn("저장됐는지 확인하기").click();
+  await page.getByText("이미 남겨진 기록이에요", { exact: false }).waitFor();
+  ok((await btn("되돌리기").count()) === 0, "고친 기록에 되돌리기가 보임");
+  const row = sql(`select note, array_to_string(tags,','), version from public.checkins where id='${h.body.p_id}'`);
+  ok(row === "가상 다른 탭 메모|sleep,meal|2", `DB 값: ${row}`);
+  ok(creates - before === 1, `생성 요청 ${creates - before}번`);
+  ok((await page.getByRole("link", { name: "내 기록에서 확인", exact: true }).first().getAttribute("href")) === "/records", "링크 주소");
+});
+
+await step("7. 응답 유실 기록을 다른 탭에서 지움 → 확인: '아직 찾지 못했어요', 되살리지 않음, 울이는 남은 기록", page, async () => {
+  const h = {};
+  await loseNextCreateResponse(h);
+  const before = creates;
+  await btn("많이 버거워요").click();
+  await btn("저장됐는지 확인하기").waitFor();
+  // 울이가 그 기록을 보여 주도록 새로고침 대신 화면을 다시 열지 않고 확인: 새 탭에서 열면 상태가 사라지므로 다른 탭 삭제만 한다
+  const { data, error } = await other.rpc("delete_checkin", { p_id: h.body.p_id, p_expected_version: 1 });
+  ok(!error && data?.status === "ok", `다른 탭 삭제 실패: ${error?.message ?? data?.status}`);
+  await btn("저장됐는지 확인하기").click();
+  await page.getByText("아직 이 기록을 찾지 못했어요", { exact: false }).waitFor();
+  ok(!(await uli()).includes("녹듯"), "지운 기록 모습");
+  await btn("다시 확인하기").click();
+  await page.getByText("아직 이 기록을 찾지 못했어요", { exact: false }).waitFor();
+  ok(sql(`select count(*) from public.checkins where id='${h.body.p_id}'`) === "0", "지운 기록이 되살아남");
+  ok(creates - before === 1, `확인 단계에서 생성 요청 ${creates - before - 1}번`);
+  await btn("‘많이 버거워요’ 새로 남기기").click();
+  await page.getByText("남겨 뒀어요", { exact: false }).waitFor();
+  ok(sql(`select count(*) from public.checkins where id='${h.body.p_id}'`) === "0", "새로 남기기가 지운 ID를 되살림");
+  ok(sql(`select count(*) from public.checkins where owner_id='${aId}' and burden='very_heavy'`) === "1", "새 기록이 1건이 아님");
+  await waitUli("녹듯");
+});
+
+await step("8. 요청이 늦게 도착: 확인 시 없음 → 늦게 저장 → '다시 확인하기'로 찾음, 두 건 안 생김", page, async () => {
+  const h = {};
+  await dropNextCreate(h);
+  await btn("모르겠어요").click();
+  await btn("저장됐는지 확인하기").waitFor();
+  ok(sql(`select count(*) from public.checkins where id='${h.body.p_id}'`) === "0", "요청이 서버에 닿음(시험 준비 실패)");
+  await btn("저장됐는지 확인하기").click();
+  await page.getByText("아직 이 기록을 찾지 못했어요", { exact: false }).waitFor();
+  const { error } = await other.rpc("create_checkin", h.body); // 같은 요청이 늦게 서버에 도착
+  ok(!error, `늦은 저장 실패: ${error?.message}`);
+  await btn("다시 확인하기").click();
+  await page.getByText("남겨 뒀어요", { exact: false }).waitFor();
+  ok(sql(`select count(*) from public.checkins where owner_id='${aId}' and burden='unsure'`) === "1", "기록이 1건이 아님");
+});
+
+await step("9. 다른 사람(B)은 A 기록을 볼 수 없음 (RLS) / A 홈 상태가 B로 넘어가지 않음", page, async () => {
+  const admin = createClient(SB, SERVICE, { auth: { persistSession: false } });
+  const { error } = await admin.auth.admin.createUser({ email: B.email, password: B.password, email_confirm: true });
+  ok(!error, `B 생성 실패: ${error?.message}`);
+  const b = createClient(SB, ANON, { auth: { persistSession: false } });
+  await b.auth.signInWithPassword(B);
+  const { data } = await b.from("checkins").select("id");
+  ok((data ?? []).length === 0, `B가 A 기록 ${data?.length}건을 봄`);
+  const { data: d2, error: e2 } = await b.rpc("delete_checkin", { p_id: h1.body.p_id, p_expected_version: 1 });
+  ok(e2 || d2?.status !== "ok", "B가 A 기록을 지움");
+  ok(sql(`select count(*) from public.checkins where id='${h1.body.p_id}'`) === "1", "A 기록이 사라짐");
+  // 같은 브라우저에서 로그아웃 → B 로그인
+  const page2 = await ctx.newPage();
+  await page2.goto(`${APP}/`).catch(() => {});
+  await page2.waitForLoadState("networkidle").catch(() => {});
+  const out = page2.getByRole("button", { name: /로그아웃/ });
+  if (await out.count()) await out.first().click();
+  else await page2.goto(`${APP}/auth/signout`).catch(() => {});
+  await page2.waitForURL(/\/login/).catch(() => {});
+  await page2.goto(`${APP}/login`).catch(() => {});
+  await page2.getByLabel("이메일").fill(B.email);
+  await page2.getByLabel("비밀번호").fill(B.password);
+  await page2.getByRole("button", { name: "로그인", exact: true }).last().click();
+  await page2.waitForURL(/\/consent|\/$/);
+  await page.bringToFront();
+  await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
+  await page.waitForFunction(() => !document.body.innerText.includes("남겨 뒀어요"), null, { timeout: 15000 });
+  ok(!(await page.locator("body").innerText()).includes("모르겠어요 ·"), "A의 저장 안내가 남음");
+  await page.screenshot({ path: `${SHOTS}/${String(++shot).padStart(2, "0")}-after-switch.png` });
+  await page2.close();
+});
+
+await browser.close();
+console.log("\nSUMMARY", results.filter((r) => r[0] === "PASS").length, "/", results.length);
+for (const r of results.filter((r) => r[0] === "FAIL")) console.log("FAIL:", r[1], "→", r[2]);
