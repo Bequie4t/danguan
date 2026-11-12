@@ -292,6 +292,55 @@ await step("9b. 오늘 기록 작성 중 머리글 '오늘 기록'을 다시 눌
   await page.waitForURL(/\/records/);
 });
 
+await step("9c. 오늘 기록 저장 중·저장 실패 직후에도 머리글 '도움이 필요해요'는 확인창 없이 바로 도움 화면으로 (다른 메뉴는 물음)", page, async () => {
+  const dialogs = [];
+  const onDialog = (d) => { dialogs.push(d.type()); void d.dismiss(); }; // 취소 = 남기
+  page.on("dialog", onDialog);
+  const banner = () => page.getByRole("banner");
+  const open = async (note) => {
+    await page.goto(`${APP}/today`);
+    await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+    await page.getByRole("button", { name: "선택 사항 더하기", exact: false }).click();
+    await page.getByRole("button", { name: "버거워요", exact: true }).click();
+    await page.locator("#note").fill(note);
+  };
+  try {
+    // (1) 저장 중: 저장 요청이 끝나지 않게 붙잡아 둔다 (가상 기록, 서버로 보내지 않음)
+    let releaseHang;
+    const hang = new Promise((r) => { releaseHang = r; });
+    await page.route("**/rest/v1/rpc/create_checkin", async (route) => { await hang; await route.abort().catch(() => {}); });
+    await open("가상 저장 중 메모 e2e");
+    await page.getByRole("button", { name: "저장하기", exact: true }).click();
+    await page.getByRole("button", { name: /저장하는 중/ }).waitFor().catch(() => {});
+    await banner().getByRole("link", { name: "내 기록", exact: true }).click({ noWaitAfter: true });
+    await page.waitForTimeout(1000);
+    ok(dialogs.join() === "beforeunload", `저장 중 다른 메뉴에서 확인창이 떠야 함: ${dialogs.join()}`);
+    ok(new URL(page.url()).pathname === "/today", "취소했는데 이동함");
+    dialogs.length = 0;
+    await banner().getByRole("link", { name: "도움이 필요해요" }).click();
+    await page.waitForURL(/\/help$/, { timeout: 10000 });
+    ok(dialogs.length === 0, "저장 중 도움 버튼에서 확인창이 뜸");
+    await page.locator('[data-help-number="109"]').waitFor();
+    releaseHang();
+    await page.unroute("**/rest/v1/rpc/create_checkin");
+    // (2) 저장 실패 직후: 요청을 실패시킨다
+    await page.route("**/rest/v1/rpc/create_checkin", (route) => route.abort());
+    await open("가상 저장 실패 메모 e2e");
+    await page.getByRole("button", { name: "저장하기", exact: true }).click();
+    await page.getByRole("button", { name: "다시 저장하기", exact: true }).waitFor();
+    dialogs.length = 0;
+    await banner().getByRole("link", { name: "도움이 필요해요" }).focus();
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/\/help$/, { timeout: 10000 });
+    ok(dialogs.length === 0, "저장 실패 뒤 도움 버튼에서 확인창이 뜸");
+    await page.unroute("**/rest/v1/rpc/create_checkin");
+    ok(sql("select count(*) from public.checkins where note like '가상 저장%메모 e2e'") === "0", "붙잡거나 실패시킨 기록이 저장됨");
+  } finally {
+    page.off("dialog", onDialog);
+    await page.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+  }
+});
+
 await step("10. 로컬 밖으로 나간 요청 없음", null, async () => {
   ok(blocked.length === 0, `막은 외부 요청: ${[...new Set(blocked)].join(", ")}`);
 });

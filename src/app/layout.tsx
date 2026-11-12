@@ -56,9 +56,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <QuietBoundary>
                 <AccountMenu />
               </QuietBoundary>
-              {/* 도움 버튼: 로그인·저장 상태와 상관없이 항상 표시. 가장 진한 색으로 눈에 띄게 둔다. */}
+              {/* 도움 버튼: 로그인·저장 상태와 상관없이 항상 표시. 가장 진한 색으로 눈에 띄게 둔다.
+                  data-leave-ok: 기록 저장 중·실패 화면의 '떠나기 전 확인'을 건너뛰고 바로 이동 (src/lib/leave-guard.ts) */}
               <a
                 href="/help"
+                data-leave-ok
                 className="flex min-h-11 items-center rounded-full bg-help-strong px-4 text-[0.95rem] font-semibold text-help-strong-fg hover:opacity-90"
               >
                 도움이 필요해요

@@ -24,6 +24,7 @@ import { saveDraft, timeLocked, type PendingSave } from "@/lib/checkins/saveFlow
 import { ownedBy } from "@/lib/session/guard";
 import { useAuthScope, useScopedRequest } from "./AuthScope";
 import RecordSummary from "./RecordSummary";
+import { installLeaveGuard } from "@/lib/leave-guard";
 
 const makeId = () => crypto.randomUUID();
 
@@ -59,15 +60,11 @@ export default function CheckinForm() {
   }, [run, guard]);
 
   // 저장 중이거나 저장에 실패한 입력이 있으면 창을 닫기 전에 묻는다.
+  // 단, '도움이 필요해요'(data-leave-ok 링크)는 묻지 않고 바로 도움 화면으로 보낸다.
   useEffect(() => {
     const risky = state.status === "saving" || state.status === "failed";
     if (!risky) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    return installLeaveGuard();
   }, [state.status]);
 
   async function submit(draft: Draft) {

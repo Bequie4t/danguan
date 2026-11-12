@@ -73,6 +73,8 @@ export const fixture = {
     if (screen === "home") { root.render(<React.Fragment key={++screenGeneration}><HomeCheckin /></React.Fragment>); return; }
     // 도움 화면은 로그인·저장과 무관: AuthScope 없이 그대로 렌더한다.
     if (screen === "help") { root.render(<React.Fragment key={++screenGeneration}><HelpPage /></React.Fragment>); return; }
+    // 도움 버튼(머리글과 같은 data-leave-ok 일반 링크) + 기록 화면: 저장 중·실패에도 도움으로 바로 이동하는지
+    if (screen === "form-help") { root.render(<><a href="/help-target" data-leave-ok="">도움이 필요해요</a> <a href="/elsewhere">다른 화면</a><AuthScope><Probe /><React.Fragment key={++screenGeneration}><CheckinForm /></React.Fragment></AuthScope></>); return; }
     // 머리글 메뉴 + 기록 작성 화면 (지금 화면 링크를 다시 눌러도 입력이 남는지)
     if (screen === "today-nav") { root.render(<><HeaderNav /><AuthScope><Probe /><React.Fragment key={++screenGeneration}><CheckinForm /></React.Fragment></AuthScope></>); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);

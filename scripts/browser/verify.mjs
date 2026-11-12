@@ -620,6 +620,50 @@ try {
       assert.equal(await page.evaluate(() => window.__noReload === true), false);
     });
 
+    // 저장 중·저장 실패 화면에서도 '도움이 필요해요'는 확인창 없이 바로 이동 (다른 링크는 계속 물음)
+    for (const phase of ["saving", "failed"]) {
+      await scenario(`기록 ${phase === "saving" ? "저장 중" : "저장 실패 직후"}: 도움 버튼은 확인창 없이 바로 이동, 다른 링크는 떠나기 전에 물음`, async () => {
+        const dialogs = [];
+        const onDialog = (d) => { dialogs.push(d.type()); void d.dismiss(); }; // 취소 = 이 화면에 남기
+        page.on("dialog", onDialog);
+        const start = async () => {
+          await page.goto(`${base}/?screen=form-help`);
+          await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+          await prepare("가상 도움 이동 메모");
+          if (phase === "saving") await page.evaluate(() => window.__fixture.hold("create_checkin"));
+          else await page.evaluate(() => { window.__fixture.failure = "request_error"; });
+          await page.getByRole("button", { name: "저장하기", exact: true }).click();
+          if (phase === "saving") await page.waitForFunction(() => window.__fixture.started("create_checkin"));
+          else await page.getByRole("button", { name: "다시 저장하기", exact: true }).waitFor();
+        };
+        try {
+          // 1) 다른 링크: 떠나기 전 확인이 뜨고, 취소하면 남는다 (확인 장치가 그대로 동작하는지)
+          await start();
+          await page.getByRole("link", { name: "다른 화면" }).click({ noWaitAfter: true });
+          await page.waitForTimeout(800);
+          assert.deepEqual(dialogs, ["beforeunload"], "다른 링크에서 떠나기 전 확인이 떠야 함");
+          assert.equal(new URL(page.url()).pathname, "/");
+          assert.equal(await page.locator("#note").inputValue(), "가상 도움 이동 메모");
+          // 2) 도움 버튼: 확인 없이 바로 이동 (마우스)
+          dialogs.length = 0;
+          await page.getByRole("link", { name: "도움이 필요해요" }).click();
+          await page.waitForURL(/\/help-target/);
+          assert.deepEqual(dialogs, [], "도움 버튼에서 확인창이 뜸");
+          // 3) 도움 버튼: 키보드(Enter)로도 바로 이동
+          await page.evaluate(() => { window.__fixture.failure = null; });
+          await start();
+          dialogs.length = 0;
+          await page.getByRole("link", { name: "도움이 필요해요" }).focus();
+          await page.keyboard.press("Enter");
+          await page.waitForURL(/\/help-target/);
+          assert.deepEqual(dialogs, [], "Enter로 누른 도움 버튼에서 확인창이 뜸");
+        } finally {
+          page.off("dialog", onDialog);
+          await page.evaluate(() => { const f = window.__fixture; if (f) { f.failure = null; f.release?.("create_checkin"); } }).catch(() => {});
+        }
+      });
+    }
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
