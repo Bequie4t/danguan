@@ -21,6 +21,7 @@ import {
   snapshot,
   withCardLock,
   browserLocks,
+  LOCK_TIMEOUT_MS,
   type LockManagerLike,
   saveCard,
   STORAGE_KEY,
@@ -51,6 +52,8 @@ type Notice =
   | "removed-elsewhere-kept"
   | "changed-elsewhere"
   | "changed-while-editing"
+  | "save-cancelled"
+  | "clear-cancelled"
   | "lock-busy"
   | "lock-unsupported";
 
@@ -120,7 +123,10 @@ export default function HardDayCard() {
   const [temporary, setTemporary] = useState(false);
   const [copied, setCopied] = useState<{ result: "copied" | "failed"; text: string } | null>(null);
   /** 잠금을 기다리며 저장·지우는 중 (버튼을 잠시 끈다) */
-  const [busy, setBusy] = useState(false);
+  /** 잠금을 기다리며 저장·지우는 중. 이때는 입력·화면 전환을 잠시 막고 '취소'만 받는다 */
+  const [busy, setBusy] = useState<null | "save" | "clear">(null);
+  /** 기다리는 요청을 철회하는 신호 (취소하면 잠금을 얻어도 실행하지 않음) */
+  const pending = useRef<AbortController | null>(null);
   /** 탭 사이 잠금을 쓸 수 있는지. 없으면 저장·지우기를 하지 않는다 */
   const [lockable, setLockable] = useState(true);
   const locks = useRef<LockManagerLike | null>(null);
@@ -169,6 +175,7 @@ export default function HardDayCard() {
       const now = readRaw(store.current); // 한 번만 읽은 값으로 판단
       if (now === undefined || now === baseRaw.current) return;
       setConfirmRaw(null); // 확인하던 카드가 바뀌었으니 지우기 확인은 닫는다
+      setConflict(null); // 이전 버전에 대한 덮어쓰기 확인·미리보기는 더 이상 맞지 않는다 (저장하면 새로 확인)
       const { phase: ph, temporary: temp, draft: d } = live.current;
       const viewingStored = ph === "view" && !temp;
       const next = parseStored(now);
@@ -200,12 +207,15 @@ export default function HardDayCard() {
     if (!canSave) return;
     const card = normalize(draft, new Date());
     const expected = overwrite && conflict ? conflict.currentRaw : baseRaw.current;
-    setBusy(true);
-    // 잠금 안에서 다시 읽어 비교한 뒤 쓴다 (다른 탭의 저장·지우기가 끼어들지 못함)
-    const locked = await withCardLock(locks.current, () => saveCard(store.current, card, expected));
-    setBusy(false);
+    const ctrl = new AbortController();
+    pending.current = ctrl;
+    setBusy("save");
+    // 잠금 안에서 다시 읽어 비교한 뒤 쓴다 (다른 탭의 저장·지우기가 끼어들지 못함). 기다리는 동안 취소할 수 있다.
+    const locked = await withCardLock(locks.current, () => saveCard(store.current, card, expected), LOCK_TIMEOUT_MS, ctrl.signal);
+    pending.current = null;
+    setBusy(null);
     if (locked.status !== "done") {
-      setNotice(locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      setNotice(locked.status === "cancelled" ? "save-cancelled" : locked.status === "busy" ? "lock-busy" : "lock-unsupported");
       return;
     }
     const r = locked.value;
@@ -256,12 +266,15 @@ export default function HardDayCard() {
   async function clear() {
     if (confirmRaw === null || busy) return;
     const expected = confirmRaw;
-    setBusy(true);
-    const locked = await withCardLock(locks.current, () => clearCard(store.current, expected));
-    setBusy(false);
+    const ctrl = new AbortController();
+    pending.current = ctrl;
+    setBusy("clear");
+    const locked = await withCardLock(locks.current, () => clearCard(store.current, expected), LOCK_TIMEOUT_MS, ctrl.signal);
+    pending.current = null;
+    setBusy(null);
     if (locked.status !== "done") {
       setConfirmRaw(null);
-      setNotice(locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      setNotice(locked.status === "cancelled" ? "clear-cancelled" : locked.status === "busy" ? "lock-busy" : "lock-unsupported");
       return;
     }
     const r = locked.value;
@@ -316,6 +329,8 @@ export default function HardDayCard() {
     "removed-elsewhere-kept": "다른 창에서 저장된 카드를 지웠어요. 이 화면에 따로 적은 내용은 그대로 있어요. 저장하려면 한 번 더 확인해요.",
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
+    "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",
+    "clear-cancelled": "지우기를 취소했어요. 카드는 그대로 있어요.",
     "lock-busy": "다른 창에서 카드를 저장하거나 지우는 중이에요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 눌러 주세요.",
     "lock-unsupported": "이 브라우저에서는 여러 창 사이에 안전하게 저장할 수 없어요. 저장된 카드는 볼 수 있고, ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
   };
@@ -344,6 +359,8 @@ export default function HardDayCard() {
             void save();
           }}
         >
+          {/* 잠금을 기다리는 동안 입력·화면 전환을 잠시 막는다 (기다리던 저장이 바뀐 입력과 어긋나지 않게) */}
+          <fieldset disabled={busy !== null} className="min-w-0 space-y-7 border-0 p-0">
           <fieldset className="space-y-3">
             <legend className="text-lg font-bold">먹을 것 (최대 {MAX_FOODS}개)</legend>
             {draft.foods.map((f, i) => {
@@ -477,7 +494,7 @@ export default function HardDayCard() {
                 disabled={!canSave}
                 className={`pastel-fill ${bigButton} disabled:cursor-not-allowed disabled:opacity-50`}
               >
-                {busy ? "저장하는 중…" : "이 기기에 저장하기"}
+                {busy === "save" ? "저장하는 중…" : "이 기기에 저장하기"}
               </button>
             )}
             {!available && <p className="text-sm">이 브라우저에서는 저장할 수 없어요.</p>}
@@ -501,6 +518,21 @@ export default function HardDayCard() {
               </button>
             )}
           </div>
+          </fieldset>
+          {busy === "save" && (
+            <div className="space-y-2 rounded border border-fg p-3">
+              <p role="status" className="text-sm font-semibold">
+                다른 창이 카드를 저장하거나 지우는 중이라 기다리고 있어요 (최대 5초). 그동안 입력은 잠시 멈춰요.
+              </p>
+              <button
+                type="button"
+                onClick={() => pending.current?.abort()}
+                className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold ${focusRing}`}
+              >
+                저장 취소
+              </button>
+            </div>
+          )}
         </form>
       </div>
     );
@@ -613,6 +645,7 @@ export default function HardDayCard() {
         </h2>
         <button
           type="button"
+          disabled={busy !== null}
           onClick={() => {
             setNotice(null);
             setPhase("edit");
@@ -632,9 +665,10 @@ export default function HardDayCard() {
         {temporary ? null : !confirmClear ? (
           <button
             type="button"
-            disabled={!lockable || busy}
+            disabled={!lockable || busy !== null}
+            aria-describedby={!lockable ? `${uid}-nolock` : undefined}
             onClick={() => setConfirmRaw(baseRaw.current)}
-            className={`min-h-11 rounded-full border border-line px-4 text-sm ${focusRing}`}
+            className={`min-h-11 rounded-full border border-line px-4 text-sm disabled:cursor-not-allowed disabled:opacity-60 ${focusRing}`}
           >
             이 기기에서 지우기
           </button>
@@ -644,18 +678,33 @@ export default function HardDayCard() {
               이 기기에서 카드를 지울까요? 지우면 되돌릴 수 없어요.
             </p>
             <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={clear} className={`min-h-11 rounded-full bg-fg px-5 font-semibold text-bg ${focusRing}`}>
-                지우기
+              <button
+                type="button"
+                onClick={() => void clear()}
+                disabled={busy !== null}
+                className={`min-h-11 rounded-full bg-fg px-5 font-semibold text-bg disabled:opacity-60 ${focusRing}`}
+              >
+                {busy === "clear" ? "지우는 중… (다른 창을 기다려요)" : "지우기"}
               </button>
               <button
                 type="button"
-                onClick={() => setConfirmRaw(null)}
+                onClick={() => {
+                  pending.current?.abort(); // 기다리는 지우기 요청을 철회 — 잠금이 풀려도 지우지 않음
+                  setConfirmRaw(null);
+                }}
                 className={`min-h-11 rounded-full border border-line px-5 ${focusRing}`}
               >
                 취소
               </button>
             </div>
           </div>
+        )}
+        {!temporary && !lockable && (
+          <p id={`${uid}-nolock`} className="text-sm">
+            이 브라우저에서는 여러 창 사이에 안전하게 지울 수 없어 지우기 버튼을 껐어요. 지우려면 브라우저 설정에서{" "}
+            <strong>이 사이트의 데이터만</strong> 지울 수 있어요. 예: 크롬은 주소창 왼쪽 아이콘 → 사이트 설정 → 데이터 삭제, 아이폰은 설정 →
+            Safari → 고급 → 웹사이트 데이터에서 이 사이트를 지워요.
+          </p>
         )}
       </section>
     </div>

@@ -206,27 +206,47 @@ export interface LockManagerLike {
   request(name: string, options: { mode: "exclusive"; signal: AbortSignal }, callback: () => unknown): Promise<unknown>;
 }
 
-export type Locked<T> = { status: "done"; value: T } | { status: "unsupported" } | { status: "busy" };
+export type Locked<T> =
+  | { status: "done"; value: T }
+  | { status: "unsupported" }
+  | { status: "busy" }
+  /** 사용자가 기다리는 중에 취소함: fn을 실행하지 않았다 */
+  | { status: "cancelled" };
 
-/** 잠금을 얻은 뒤 fn을 실행한다. 잠금이 없으면 unsupported, 시간 안에 못 얻으면 busy (fn은 실행하지 않음) */
+/**
+ * 잠금을 얻은 뒤 fn을 실행한다. 잠금이 없으면 unsupported, 시간 안에 못 얻으면 busy,
+ * cancel 신호가 오면 cancelled (어느 경우든 fn은 실행하지 않음).
+ * 잠금을 얻은 순간에도 취소 여부를 다시 확인한다 — 취소한 요청이 나중에 실행되지 않게.
+ */
 export async function withCardLock<T>(
   locks: LockManagerLike | null | undefined,
   fn: () => T,
   timeoutMs = LOCK_TIMEOUT_MS,
+  cancel?: AbortSignal,
 ): Promise<Locked<T>> {
   if (!locks || typeof locks.request !== "function") return { status: "unsupported" };
-  const ctrl = new AbortController();
+  if (cancel?.aborted) return { status: "cancelled" };
+  const ctrl = new AbortController(); // 아직 얻지 못한 잠금 요청을 철회한다
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const onCancel = () => ctrl.abort();
+  cancel?.addEventListener("abort", onCancel);
   let out: Locked<T> = { status: "busy" };
   try {
     await locks.request(LOCK_NAME, { mode: "exclusive", signal: ctrl.signal }, () => {
+      if (cancel?.aborted) {
+        out = { status: "cancelled" };
+        return;
+      }
+      if (ctrl.signal.aborted) return; // 시간이 지난 뒤 늦게 얻은 경우도 실행하지 않음
       out = { status: "done", value: fn() };
     });
   } catch {
-    // 시간 초과(AbortError) 등: 실행하지 않았다
+    // 철회(AbortError) 등: 실행하지 않았다
   } finally {
     clearTimeout(timer);
+    cancel?.removeEventListener("abort", onCancel);
   }
+  if (out.status === "busy" && cancel?.aborted) return { status: "cancelled" };
   return out;
 }
 

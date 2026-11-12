@@ -292,3 +292,35 @@ test("잠금을 쓸 수 없으면 저장·지우기를 하지 않고, 시간 안
   await holder;
   assert.deepEqual(await withCardLock(locks, () => 7, 30), { status: "done", value: 7 });
 });
+
+test("잠금을 기다리는 중에 취소하면, 잠금이 풀린 뒤에도 실행하지 않는다", async () => {
+  const locks = new FakeLocks();
+  let release!: () => void;
+  const holder = locks.request(LOCK_NAME, { mode: "exclusive", signal: new AbortController().signal }, () => new Promise<void>((r) => (release = r)));
+  let ran = false;
+  const cancel = new AbortController();
+  const waiting = withCardLock(locks, () => (ran = true), 1000, cancel.signal);
+  await new Promise((r) => setTimeout(r, 10));
+  cancel.abort(); // 사용자가 '취소'
+  release(); // 그 뒤 다른 탭이 잠금을 놓음
+  await holder;
+  assert.deepEqual(await waiting, { status: "cancelled" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ran, false, "취소한 요청이 실행됨");
+  // 이미 취소된 신호로는 시작조차 하지 않음
+  const done = new AbortController();
+  done.abort();
+  assert.deepEqual(await withCardLock(locks, () => (ran = true), 1000, done.signal), { status: "cancelled" });
+  assert.equal(ran, false);
+});
+
+test("잠금을 얻는 순간 이미 취소돼 있으면 실행하지 않는다 (철회가 늦은 경우)", async () => {
+  // 철회 신호를 무시하는 잠금 관리자: 취소 뒤에도 콜백을 부른다
+  const stubborn: LockManagerLike = { request: (_n, _o, cb) => new Promise((r) => setTimeout(() => r(cb()), 20)) };
+  let ran = false;
+  const cancel = new AbortController();
+  const p = withCardLock(stubborn, () => (ran = true), 1000, cancel.signal);
+  cancel.abort();
+  assert.deepEqual(await p, { status: "cancelled" });
+  assert.equal(ran, false);
+});
