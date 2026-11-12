@@ -36,17 +36,17 @@ function resolveSpec(spec: string, from: string): string | null {
   throw new Error(`해석할 수 없는 import: ${spec} (${relative(ROOT, from)})`);
 }
 
-function importsOf(file: string): string[] {
+function importsOf(file: string, staticOnly = false): string[] {
   const code = readFileSync(file, "utf8");
   const specs = new Set<string>();
   for (const m of code.matchAll(/(?:import|export)\s[^'"]*?from\s*["']([^"']+)["']/g)) specs.add(m[1]);
-  for (const m of code.matchAll(/import\s*\(\s*["']([^"']+)["']\s*\)/g)) specs.add(m[1]);
+  if (!staticOnly) for (const m of code.matchAll(/import\s*\(\s*["']([^"']+)["']\s*\)/g)) specs.add(m[1]);
   for (const m of code.matchAll(/^\s*import\s*["']([^"']+)["']/gm)) specs.add(m[1]);
   return [...specs];
 }
 
 /** 시작 파일들에서 닿는 모든 (파일 또는 패키지) 목록과 경로 */
-function walk(starts: string[]) {
+function walk(starts: string[], staticOnly = false) {
   const seen = new Map<string, string[]>(); // 파일 → 그 파일까지의 경로
   const packages: { spec: string; via: string[] }[] = [];
   const queue = starts.map((f) => ({ file: f, via: [relative(ROOT, f)] }));
@@ -54,7 +54,7 @@ function walk(starts: string[]) {
     const { file, via } = queue.shift()!;
     if (seen.has(file)) continue;
     seen.set(file, via);
-    for (const spec of importsOf(file)) {
+    for (const spec of importsOf(file, staticOnly)) {
       const target = resolveSpec(spec, file);
       if (target) queue.push({ file: target, via: [...via, relative(ROOT, target)] });
       else packages.push({ spec, via });
@@ -97,4 +97,16 @@ test("미들웨어가 도움 화면을 건드리지 않는다 (matcher에서 /he
   const code = readFileSync(mw, "utf8");
   const matcher = code.match(/matcher\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "";
   assert.ok(matcher.includes("help"), `미들웨어 matcher에 help 제외가 없음: ${matcher.trim()}`);
+});
+
+test("공통 머리글(layout)은 로그인 코드를 바로 가져오지 않는다 (도움 화면에서 불러오지 않도록 필요할 때만 불러옴)", () => {
+  const { files, packages } = walk([join(SRC, "app", "layout.tsx")], true);
+  for (const [file, via] of files) {
+    for (const rule of FORBIDDEN.slice(0, 5)) assert.ok(!rule.test("", file), `${rule.why}에 닿음: ${via.join(" → ")}`);
+  }
+  for (const { spec, via } of packages) assert.ok(!spec.startsWith("@supabase/"), `${spec}에 닿음: ${via.join(" → ")}`);
+  // 계정 메뉴는 로그인 코드를 import() 로만 불러온다
+  const menu = readFileSync(join(SRC, "components", "AccountMenu.tsx"), "utf8");
+  assert.match(menu, /import\(\s*["']@\/lib\/supabase\/client["']\s*\)/);
+  assert.match(readFileSync(join(SRC, "app", "layout.tsx"), "utf8"), /<QuietBoundary>\s*<AccountMenu \/>/);
 });

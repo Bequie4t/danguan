@@ -535,6 +535,8 @@ try {
       assert.deepEqual(cards.map((c) => c.number), ["109", "1577-0199", "119", "112"]);
       assert.deepEqual(cards.map((c) => c.href), ["tel:109", "tel:15770199", "tel:119", "tel:112"]);
       for (const c of cards) { assert.ok(c.h >= 44 && c.w >= 44, `${c.number} 누르는 영역이 작음`); assert.ok(c.label.includes(c.number) && c.label.includes("전화 걸기")); }
+      const described = await page.locator("[data-help-number]").evaluateAll((els) => els.map((a) => document.getElementById(a.getAttribute("aria-describedby") ?? "")?.textContent ?? ""));
+      assert.ok(described.every((t) => t.length > 5), "번호마다 상세 안내가 설명(aria-describedby)으로 연결돼야 함");
       assert.ok(cards[0].size > Math.max(...cards.slice(1).map((c) => c.size)), "109가 가장 크지 않음");
       assert.ok(cards[0].top < cards[1].top, "109가 맨 위가 아님");
       assert.equal(await page.locator('a[href="/help/contact-card"][download]').count(), 1, "연락처 저장 링크");

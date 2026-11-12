@@ -1,36 +1,58 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
 
-/** 로그인 상태 표시와 로그아웃. 실패해도 머리글(도움 버튼)은 그대로 보인다. */
+// 로그인 코드는 필요할 때만 불러온다. 도움 화면(/help)에서는 아예 불러오지 않는다.
+const loadClient = () => import("@/lib/supabase/client").then((m) => m.getBrowserClient());
+
+/** /help 와 그 아래(연락처 파일 등)는 로그인과 독립 */
+export function isHelpPath(pathname: string | null): boolean {
+  return pathname === "/help" || (pathname ?? "").startsWith("/help/");
+}
+
+/**
+ * 로그인 상태 표시와 로그아웃. 실패해도 머리글(도움 버튼)은 그대로 보인다.
+ * 도움 화면에서는 아무것도 하지 않고 표시하지도 않는다 (인증 초기화·네트워크 요청 없음).
+ */
 export default function AccountMenu() {
+  const pathname = usePathname();
+  const onHelp = isHelpPath(pathname);
   const [state, setState] = useState<"unknown" | "in" | "out">("unknown");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const supabase = getBrowserClient();
-    if (!supabase) {
-      setState("out");
-      return;
-    }
+    if (onHelp) return;
     let alive = true;
-    supabase.auth
-      .getUser()
-      .then(({ data }) => alive && setState(data.user ? "in" : "out"))
+    let unsubscribe: (() => void) | null = null;
+    loadClient()
+      .then((supabase) => {
+        if (!alive) return;
+        if (!supabase) {
+          setState("out");
+          return;
+        }
+        supabase.auth
+          .getUser()
+          .then(({ data }) => alive && setState(data.user ? "in" : "out"))
+          .catch(() => alive && setState("out"));
+        const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+          if (alive) setState(session?.user ? "in" : "out");
+        });
+        unsubscribe = () => sub.subscription.unsubscribe();
+      })
       .catch(() => alive && setState("out"));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (alive) setState(session?.user ? "in" : "out");
-    });
     return () => {
       alive = false;
-      sub.subscription.unsubscribe();
+      unsubscribe?.();
     };
-  }, []);
+  }, [onHelp]);
+
+  if (onHelp) return null;
 
   async function signOut() {
-    const supabase = getBrowserClient();
+    const supabase = await loadClient().catch(() => null);
     setBusy(true);
     try {
       await supabase?.auth.signOut({ scope: "local" });

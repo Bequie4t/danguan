@@ -34,10 +34,12 @@ function CallCard({ contact, kind }: { contact: HelpContact; kind: "primary" | "
         ? "text-[clamp(1rem,11cqw,1.875rem)]"
         : "text-[clamp(1rem,22cqw,1.875rem)]";
   const detailColor = kind === "primary" ? "text-help-strong-fg/85" : "text-muted";
+  const detailId = `help-detail-${contact.tel}`;
   return (
     <a
       href={`tel:${contact.tel}`}
-      aria-label={`${contact.name} ${contact.number}로 전화 걸기. ${contact.detail}`}
+      aria-label={`${contact.name} ${contact.number}로 전화 걸기`}
+      aria-describedby={detailId}
       data-help-number={contact.number}
       className={`@container flex h-full min-h-14 rounded no-underline ${look} ${focusRing} ${
         kind === "plain" ? "flex-col gap-1.5" : "flex-wrap items-center justify-between gap-x-4 gap-y-2"
@@ -47,14 +49,14 @@ function CallCard({ contact, kind }: { contact: HelpContact; kind: "primary" | "
         <>
           <span className={`font-label font-medium leading-none tracking-wide whitespace-nowrap ${numberSize}`}>{contact.number}</span>
           <span className="font-semibold [overflow-wrap:anywhere]">{contact.name}</span>
-          <span className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
+          <span id={detailId} className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
         </>
       ) : (
         <>
           <span className="flex min-w-0 flex-1 basis-48 flex-col gap-1">
             {/* 낱말 단위 줄바꿈을 지키되, 화면이 너무 좁을 때만 낱말 안에서도 줄을 바꾼다 (200% 확대) */}
             <span className="text-base font-bold [overflow-wrap:anywhere]">{contact.name}</span>
-            <span className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
+            <span id={detailId} className={`text-sm leading-relaxed [overflow-wrap:anywhere] ${detailColor}`}>{contact.detail}</span>
           </span>
           <span className={`font-label font-medium leading-none tracking-wide whitespace-nowrap ${numberSize}`}>{contact.number}</span>
         </>
