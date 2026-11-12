@@ -193,6 +193,52 @@ export function clearCard(store: KeyValueStore | null, expectedRaw: string | nul
   }
 }
 
+// ── 탭 사이 잠금 (Web Locks) ─────────────────────────────
+// 비교(읽기)와 쓰기·지우기 사이에 다른 탭이 끼어들지 못하게, 이 앱의 모든 카드 저장·지우기는 같은 잠금 안에서 한다.
+// localStorage 자체는 이런 잠금을 보장하지 않는다. 잠금을 쓸 수 없는 브라우저에서는 저장·지우기를 하지 않는다
+// (기존 카드 읽기와 '이번에만 보기'는 그대로 쓸 수 있다).
+
+export const LOCK_NAME = "404blue.hardday";
+export const LOCK_TIMEOUT_MS = 5000;
+
+/** navigator.locks 중 이 파일이 쓰는 부분 */
+export interface LockManagerLike {
+  request(name: string, options: { mode: "exclusive"; signal: AbortSignal }, callback: () => unknown): Promise<unknown>;
+}
+
+export type Locked<T> = { status: "done"; value: T } | { status: "unsupported" } | { status: "busy" };
+
+/** 잠금을 얻은 뒤 fn을 실행한다. 잠금이 없으면 unsupported, 시간 안에 못 얻으면 busy (fn은 실행하지 않음) */
+export async function withCardLock<T>(
+  locks: LockManagerLike | null | undefined,
+  fn: () => T,
+  timeoutMs = LOCK_TIMEOUT_MS,
+): Promise<Locked<T>> {
+  if (!locks || typeof locks.request !== "function") return { status: "unsupported" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let out: Locked<T> = { status: "busy" };
+  try {
+    await locks.request(LOCK_NAME, { mode: "exclusive", signal: ctrl.signal }, () => {
+      out = { status: "done", value: fn() };
+    });
+  } catch {
+    // 시간 초과(AbortError) 등: 실행하지 않았다
+  } finally {
+    clearTimeout(timer);
+  }
+  return out;
+}
+
+export function browserLocks(): LockManagerLike | null {
+  try {
+    const l = (navigator as Navigator & { locks?: LockManagerLike }).locks;
+    return l && typeof l.request === "function" ? l : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 두 카드의 내용이 같은지 (저장 시각 제외) */
 export function sameContent(
   a: Pick<HardDayCard, "foods" | "people" | "message">,

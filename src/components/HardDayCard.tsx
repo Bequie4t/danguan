@@ -18,8 +18,10 @@ import {
   normalize,
   parseStored,
   readRaw,
-  sameContent,
   snapshot,
+  withCardLock,
+  browserLocks,
+  type LockManagerLike,
   saveCard,
   STORAGE_KEY,
   urlProblem,
@@ -48,7 +50,14 @@ type Notice =
   | "removed-elsewhere"
   | "removed-elsewhere-kept"
   | "changed-elsewhere"
-  | "changed-while-editing";
+  | "changed-while-editing"
+  | "lock-busy"
+  | "lock-unsupported";
+
+/** 사용자가 실제로 입력한 값 그대로 비교 (정리한 값이 아니라 — 'https://'만 쓴 칸도 바뀐 것으로) */
+function sameDraft(a: Draft, b: Draft): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 function emptyDraft(): Draft {
   const e = emptyCard();
@@ -66,6 +75,26 @@ function fromCard(c: Card): Draft {
 function formatSaved(iso: string): string {
   const d = new Date(iso);
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일`;
+}
+
+/** 충돌 때 지금 저장돼 있는 카드를 보여 준다 (초안을 버리지 않고 비교할 수 있게) */
+function ConflictPreview({ raw }: { raw: string | null }) {
+  if (raw === null) {
+    return <p className="rounded border border-line bg-surface p-3 text-sm">지금 이 브라우저에 저장된 카드는 없어요 (다른 창에서 지웠어요).</p>;
+  }
+  const r = parseStored(raw);
+  if (r.status !== "ok") {
+    return <p className="rounded border border-line bg-surface p-3 text-sm">지금 저장된 카드는 읽을 수 없는 상태예요.</p>;
+  }
+  const c = r.card;
+  return (
+    <div data-conflict-preview className="space-y-1 rounded border border-line bg-surface p-3 text-sm">
+      <p className="font-semibold">지금 저장돼 있는 카드 (다른 창에서 바뀐 내용)</p>
+      <p>먹을 것: {c.foods.length ? c.foods.map((f) => f.name || "이름 없음").join(", ") : "없음"}</p>
+      <p>부탁할 사람: {c.people.length ? c.people.join(", ") : "없음"}</p>
+      <p>부탁 문장: {c.message || "없음"}</p>
+    </div>
+  );
 }
 
 export default function HardDayCard() {
@@ -90,6 +119,11 @@ export default function HardDayCard() {
   /** '저장하지 않고 이번에만 보기'로 연 카드 (저장소에 없음) */
   const [temporary, setTemporary] = useState(false);
   const [copied, setCopied] = useState<{ result: "copied" | "failed"; text: string } | null>(null);
+  /** 잠금을 기다리며 저장·지우는 중 (버튼을 잠시 끈다) */
+  const [busy, setBusy] = useState(false);
+  /** 탭 사이 잠금을 쓸 수 있는지. 없으면 저장·지우기를 하지 않는다 */
+  const [lockable, setLockable] = useState(true);
+  const locks = useRef<LockManagerLike | null>(null);
   const msgRef = useRef<HTMLTextAreaElement>(null);
   const live = useRef({ phase: "loading" as Phase, temporary: false, draft: emptyDraft() });
   const uid = useId();
@@ -125,6 +159,8 @@ export default function HardDayCard() {
   // 처음 열 때 이 기기에 저장된 카드를 읽는다 (서버 렌더링 때는 읽지 않음). 읽기·저장·지우기는 따로 다룬다.
   useEffect(() => {
     store.current = browserStore();
+    locks.current = browserLocks();
+    setLockable(locks.current !== null);
     applySnapshot(snapshot(store.current));
 
     // 다른 창(탭)에서 지우거나 바꾸면 바로 반영한다. 지운 저장 카드는 되살리지 않고, 따로 적던 내용은 지킨다.
@@ -141,7 +177,7 @@ export default function HardDayCard() {
         applySnapshot({ result: next, raw: now }, now === null ? "removed-elsewhere" : next.status === "ok" ? "changed-elsewhere" : null);
         return;
       }
-      if (now === null && ph === "edit" && stored.current && sameContent(normalize(d, new Date()), stored.current)) {
+      if (now === null && ph === "edit" && !temp && stored.current && sameDraft(d, fromCard(stored.current))) {
         // 지워진 카드를 고치지 않고 열어 둔 상태: 지운 내용이 남지 않게 비운다
         applySnapshot({ result: { status: "empty" }, raw: null }, "removed-elsewhere");
         return;
@@ -157,14 +193,22 @@ export default function HardDayCard() {
 
   const problems = draft.foods.map((f) => urlProblem(f.url));
   const valid = hasContent(draft) && problems.every((p) => p === null);
-  const canSave = available && valid;
+  const canSave = available && lockable && valid && !busy;
 
   /** overwrite: 충돌 경고를 본 뒤 '그래도 저장' — 경고를 띄운 그 버전에만 적용된다 */
-  function save(overwrite = false) {
+  async function save(overwrite = false) {
     if (!canSave) return;
     const card = normalize(draft, new Date());
     const expected = overwrite && conflict ? conflict.currentRaw : baseRaw.current;
-    const r = saveCard(store.current, card, expected);
+    setBusy(true);
+    // 잠금 안에서 다시 읽어 비교한 뒤 쓴다 (다른 탭의 저장·지우기가 끼어들지 못함)
+    const locked = await withCardLock(locks.current, () => saveCard(store.current, card, expected));
+    setBusy(false);
+    if (locked.status !== "done") {
+      setNotice(locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      return;
+    }
+    const r = locked.value;
     if (r.status === "saved") {
       baseRaw.current = r.raw;
       stored.current = card;
@@ -197,9 +241,30 @@ export default function HardDayCard() {
     applySnapshot(snapshot(store.current));
   }
 
-  function clear() {
-    if (confirmRaw === null) return;
-    const r = clearCard(store.current, confirmRaw);
+  /** 고치지 않고 돌아가기: 저장 카드를 고치던 중이면 지금 저장소를 다시 읽고, 임시 카드면 임시 보기로 */
+  function cancelEdit() {
+    if (temporary && saved) {
+      setDraft(fromCard(saved));
+      setConflict(null);
+      setNotice(null);
+      setPhase("view");
+      return;
+    }
+    applySnapshot(snapshot(store.current));
+  }
+
+  async function clear() {
+    if (confirmRaw === null || busy) return;
+    const expected = confirmRaw;
+    setBusy(true);
+    const locked = await withCardLock(locks.current, () => clearCard(store.current, expected));
+    setBusy(false);
+    if (locked.status !== "done") {
+      setConfirmRaw(null);
+      setNotice(locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      return;
+    }
+    const r = locked.value;
     if (r.status === "cleared") {
       applySnapshot({ result: { status: "empty" }, raw: null }, "cleared");
     } else if (r.status === "conflict") {
@@ -251,6 +316,8 @@ export default function HardDayCard() {
     "removed-elsewhere-kept": "다른 창에서 저장된 카드를 지웠어요. 이 화면에 따로 적은 내용은 그대로 있어요. 저장하려면 한 번 더 확인해요.",
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
+    "lock-busy": "다른 창에서 카드를 저장하거나 지우는 중이에요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 눌러 주세요.",
+    "lock-unsupported": "이 브라우저에서는 여러 창 사이에 안전하게 저장할 수 없어요. 저장된 카드는 볼 수 있고, ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
   };
 
   const header = (
@@ -274,7 +341,7 @@ export default function HardDayCard() {
           className="space-y-7"
           onSubmit={(e) => {
             e.preventDefault();
-            save();
+            void save();
           }}
         >
           <fieldset className="space-y-3">
@@ -396,7 +463,8 @@ export default function HardDayCard() {
             </p>
             {conflict ? (
               <div role="group" aria-label="다른 창의 변경" className="space-y-2">
-                <button type="button" onClick={() => save(true)} disabled={!canSave} className={`pastel-fill ${bigButton} disabled:opacity-50`}>
+                <ConflictPreview raw={conflict.currentRaw} />
+                <button type="button" onClick={() => void save(true)} disabled={!canSave} className={`pastel-fill ${bigButton} disabled:opacity-50`}>
                   {conflict.currentRaw === null ? "그래도 지금 적은 내용으로 새로 저장하기" : "그래도 지금 적은 내용으로 바꾸기"}
                 </button>
                 <button type="button" onClick={reloadStored} className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold ${focusRing}`}>
@@ -409,10 +477,11 @@ export default function HardDayCard() {
                 disabled={!canSave}
                 className={`pastel-fill ${bigButton} disabled:cursor-not-allowed disabled:opacity-50`}
               >
-                이 기기에 저장하기
+                {busy ? "저장하는 중…" : "이 기기에 저장하기"}
               </button>
             )}
             {!available && <p className="text-sm">이 브라우저에서는 저장할 수 없어요.</p>}
+            {available && !lockable && <p className="text-sm">이 브라우저에서는 여러 창 사이에 안전하게 저장할 수 없어 저장을 막았어요.</p>}
             {!hasContent(draft) && <p className="text-sm">하나라도 적으면 저장하거나 볼 수 있어요.</p>}
             <button
               type="button"
@@ -422,15 +491,10 @@ export default function HardDayCard() {
             >
               저장하지 않고 이번에만 보기
             </button>
-            {saved && (
+            {(temporary ? saved !== null : stored.current !== null) && (
               <button
                 type="button"
-                onClick={() => {
-                  setDraft(fromCard(saved));
-                  setConflict(null);
-                  setNotice(null);
-                  setPhase("view");
-                }}
+                onClick={cancelEdit}
                 className={`min-h-11 w-full rounded-full border border-line px-4 ${focusRing}`}
               >
                 고치지 않고 카드로 돌아가기
@@ -568,6 +632,7 @@ export default function HardDayCard() {
         {temporary ? null : !confirmClear ? (
           <button
             type="button"
+            disabled={!lockable || busy}
             onClick={() => setConfirmRaw(baseRaw.current)}
             className={`min-h-11 rounded-full border border-line px-4 text-sm ${focusRing}`}
           >

@@ -19,6 +19,9 @@ import {
   sameContent,
   snapshot,
   urlProblem,
+  withCardLock,
+  LOCK_NAME,
+  type LockManagerLike,
   type KeyValueStore,
 } from "../src/lib/hardday/card";
 import { SRC, listFiles, violations } from "./helpers/import-graph";
@@ -222,4 +225,70 @@ test("힘든 날 카드는 로그인·기록 저장·Supabase 코드를 가져�
   assert.deepEqual(violations(files), []);
   const mw = readFileSync(join(SRC, "middleware.ts"), "utf8");
   assert.match(mw.match(/matcher\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "", /\|hardday\|/);
+});
+
+// 가상 잠금: 같은 이름이면 하나씩 차례로, signal로 기다림을 그만둘 수 있다 (navigator.locks 흉내)
+class FakeLocks implements LockManagerLike {
+  tail: Promise<void> = Promise.resolve();
+  names: string[] = [];
+  request(name: string, opts: { mode: "exclusive"; signal: AbortSignal }, cb: () => unknown): Promise<unknown> {
+    this.names.push(name);
+    const prev = this.tail;
+    let done!: () => void;
+    this.tail = new Promise<void>((r) => (done = r));
+    return new Promise((resolve, reject) => {
+      let started = false;
+      opts.signal.addEventListener("abort", () => {
+        if (!started) {
+          prev.then(done);
+          reject(new DOMException("abort", "AbortError"));
+        }
+      });
+      prev.then(async () => {
+        if (opts.signal.aborted) return;
+        started = true;
+        try {
+          resolve(await cb());
+        } finally {
+          done();
+        }
+      });
+    });
+  }
+}
+
+test("저장·지우기는 탭 사이 잠금 안에서: 다른 탭이 잠금을 쥐고 쓰는 동안 기다렸다가, 다시 읽어 비교한다", async () => {
+  const s = new MemoryStore();
+  const locks = new FakeLocks();
+  const first = saveCard(s, normalize({ foods: [], people: [], message: "가상 처음" }, NOW), null);
+  const base = first.status === "saved" ? first.raw : null;
+  // 다른 탭: 잠금을 쥐고 카드를 바꾼다 (끝나기 전까지 이 탭은 기다림)
+  let release!: () => void;
+  const otherTab = locks.request(LOCK_NAME, { mode: "exclusive", signal: new AbortController().signal }, async () => {
+    await new Promise<void>((r) => (release = r));
+    s.setItem(STORAGE_KEY, JSON.stringify(normalize({ foods: [], people: [], message: "가상 다른 탭" }, NOW)));
+  });
+  const mine = withCardLock(locks, () => saveCard(s, normalize({ foods: [], people: [], message: "가상 이 탭" }, NOW), base), 1000);
+  await new Promise((r) => setTimeout(r, 20));
+  release();
+  await otherTab;
+  const r = await mine;
+  assert.equal(r.status, "done");
+  if (r.status === "done") assert.equal(r.value.status, "conflict", "잠금 뒤 다시 비교하지 않고 덮어씀");
+  assert.match(s.getItem(STORAGE_KEY)!, /가상 다른 탭/);
+  assert.deepEqual(locks.names, [LOCK_NAME, LOCK_NAME], "같은 이름의 잠금");
+});
+
+test("잠금을 쓸 수 없으면 저장·지우기를 하지 않고, 시간 안에 못 얻으면 실행하지 않는다", async () => {
+  let ran = false;
+  assert.deepEqual(await withCardLock(null, () => (ran = true)), { status: "unsupported" });
+  assert.deepEqual(await withCardLock({} as LockManagerLike, () => (ran = true)), { status: "unsupported" });
+  const locks = new FakeLocks();
+  let release!: () => void;
+  const holder = locks.request(LOCK_NAME, { mode: "exclusive", signal: new AbortController().signal }, () => new Promise<void>((r) => (release = r)));
+  assert.deepEqual(await withCardLock(locks, () => (ran = true), 30), { status: "busy" });
+  assert.equal(ran, false, "잠금 없이 실행됨");
+  release();
+  await holder;
+  assert.deepEqual(await withCardLock(locks, () => 7, 30), { status: "done", value: 7 });
 });
