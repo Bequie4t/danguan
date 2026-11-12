@@ -8,6 +8,7 @@ import {
   SOFTENER,
   askReducer,
   buildSentence,
+  canSend,
   clean,
   currentText,
   initialAskState,
@@ -72,23 +73,46 @@ test("직접 고친 문장은 다른 칸을 바꿔도 덮어쓰지 않고, '처�
   assert.match(currentText(s), /^민지야, 내일 병원 가는데/);
 });
 
-test("상황을 바꾸면 그 상황의 새 문장, 칸 값은 비움 (이름은 유지)", () => {
+test("상황을 바꾸면 칸 값은 비우고, 직접 고친 문장은 그대로 둔다 ('처음 문장으로'를 눌러야 새 상황 문장)", () => {
   let s = askReducer(initialAskState, { type: "name", value: "민지" });
   s = askReducer(s, { type: "detail", value: "내일" });
-  s = askReducer(s, { type: "edit", value: "가상 고친 문장" });
   s = askReducer(s, { type: "pick", kind: "meal" as AskKind });
   assert.equal(s.detail, "");
-  assert.equal(s.edited, null);
-  assert.match(currentText(s), /^민지야, 오늘 밥 좀 시켜 줄 수 있어/);
+  assert.match(currentText(s), /^민지야, 오늘 밥 좀 시켜 줄 수 있어/, "고치지 않았으면 새 상황 문장");
+  s = askReducer(s, { type: "edit", value: "가상 고친 문장" });
+  s = askReducer(s, { type: "pick", kind: "call" as AskKind });
+  assert.equal(currentText(s), "가상 고친 문장", "상황을 바꿔도 고친 문장이 사라지면 안 됨");
+  s = askReducer(s, { type: "regenerate" });
+  assert.match(currentText(s), /^민지야, 오늘은 답장을 못 할 수도/);
 });
 
 test("복사는 '보냄'이 아니다: 상태는 copied/failed뿐이고, 내용을 바꾸면 안내가 사라진다", () => {
-  let s = askReducer(initialAskState, { type: "copied", ok: true });
+  let s = askReducer(initialAskState, { type: "copied", ok: true, text: currentText(initialAskState) });
   assert.equal(s.copied, "copied");
   s = askReducer(s, { type: "name", value: "가" });
   assert.equal(s.copied, "idle");
   assert.ok(!Object.keys(s).some((k) => /sent|send/i.test(k)), "보냄 상태를 두지 않음");
   assert.deepEqual(askReducer(s, { type: "reset" }), initialAskState);
+});
+
+test("복사하는 사이 문장이 바뀌면, 끝난 복사(이전 문장)를 지금 문장의 결과로 표시하지 않는다", () => {
+  const a = currentText(initialAskState);
+  let s = askReducer(initialAskState, { type: "edit", value: "가상 B 문장" });
+  s = askReducer(s, { type: "copied", ok: true, text: a }); // A 복사가 늦게 끝남
+  assert.equal(s.copied, "idle", "B 화면에 '복사했어요'가 뜨면 안 됨");
+  s = askReducer(s, { type: "copied", ok: false, text: a });
+  assert.equal(s.copied, "idle", "A 복사 실패도 B에 표시하지 않음");
+  s = askReducer(s, { type: "copied", ok: true, text: "가상 B 문장" });
+  assert.equal(s.copied, "copied");
+});
+
+test("공백뿐인 문장은 보낼 수 없고, 복사 성공으로 표시하지 않는다", () => {
+  assert.equal(canSend("   \n "), false);
+  assert.equal(canSend("가"), true);
+  let s = askReducer(initialAskState, { type: "edit", value: "  " });
+  assert.equal(canSend(currentText(s)), false);
+  s = askReducer(s, { type: "copied", ok: true, text: "  " });
+  assert.notEqual(s.copied, "copied");
 });
 
 test("이름·칸·문장 길이 제한", () => {

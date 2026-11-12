@@ -732,6 +732,43 @@ try {
       await page.getByText("복사하지 못했어요.", { exact: false }).waitFor();
     });
 
+    await scenario("부탁하기: 복사 중 문장을 고치면 이전 문장 복사 결과를 '복사했어요'로 표시하지 않음", async () => {
+      await openAsk();
+      // 복사가 늦게 끝나도록 가상 클립보드를 붙잡아 둔다
+      await page.evaluate(() => {
+        window.__clip = [];
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((r) => { window.__clip.push({ t, r }); }) } });
+      });
+      const a = await sentence().inputValue();
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await sentence().fill("가상 B 문장");
+      await page.evaluate(() => window.__clip[0].r());
+      await page.waitForTimeout(200);
+      assert.equal(await page.evaluate(() => window.__clip[0].t), a, "복사된 것은 이전 문장");
+      assert.equal(await page.getByText("복사했어요.", { exact: false }).count(), 0, "바뀐 문장에 '복사했어요'가 뜸");
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.evaluate(() => window.__clip[1].r());
+      await page.getByText("복사했어요.", { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => window.__clip[1].t), "가상 B 문장");
+    });
+
+    await scenario("부탁하기: 고친 문장은 상황을 바꿔도 그대로, 빈 문장이면 복사·메시지 앱 버튼이 꺼짐, 복사가 첫 버튼", async () => {
+      await openAsk();
+      const buttons = await page.locator("main").getByRole("button", { name: /^(복사하기|메시지 앱으로)$/ }).or(page.locator("main").getByRole("link", { name: "메시지 앱으로" })).allInnerTexts();
+      assert.deepEqual(buttons.map((t) => t.trim()), ["복사하기", "메시지 앱으로"], "복사하기가 먼저");
+      await sentence().fill("가상 직접 고친 부탁");
+      await page.getByRole("radio", { name: /전화 한 번 해 주기/ }).check();
+      assert.equal(await sentence().inputValue(), "가상 직접 고친 부탁", "상황을 바꾸자 고친 문장이 사라짐");
+      await sentence().fill("   ");
+      assert.equal(await page.getByRole("button", { name: "복사하기" }).isDisabled(), true);
+      assert.equal(await page.getByRole("link", { name: "메시지 앱으로" }).count(), 0, "빈 문장인데 메시지 앱 링크가 살아 있음");
+      assert.equal(await page.getByRole("button", { name: "메시지 앱으로" }).isDisabled(), true);
+      await page.getByText("보낼 문장이 비어 있어요", { exact: false }).waitFor();
+      await page.getByRole("button", { name: "처음 문장으로" }).click();
+      assert.match(await sentence().inputValue(), /전화 한 번만 줄 수 있어/);
+      assert.equal(await page.getByRole("button", { name: "복사하기" }).isEnabled(), true);
+    });
+
     await scenario("부탁하기: 키보드만으로 상황 고르기·복사 버튼까지 이동, 초점 표시", async () => {
       await openAsk();
       await page.getByRole("radio", { name: /병원에 같이 가 주기/ }).focus();

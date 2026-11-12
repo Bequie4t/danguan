@@ -104,14 +104,16 @@ export type AskAction =
   | { type: "soften"; value: boolean }
   | { type: "edit"; value: string }
   | { type: "regenerate" }
-  | { type: "copied"; ok: boolean }
+  /** 복사가 끝났을 때. text = 복사를 시작할 때의 문장 (그사이 문장이 바뀌었으면 안내하지 않음) */
+  | { type: "copied"; ok: boolean; text: string }
   | { type: "reset" };
 
 export function askReducer(state: AskState, action: AskAction): AskState {
   switch (action.type) {
     case "pick":
-      // 상황을 바꾸면 그 상황의 새 문장을 만든다. 칸 값은 상황마다 뜻이 달라 비운다.
-      return { ...state, kind: action.kind, detail: "", edited: null, copied: "idle" };
+      // 칸 값은 상황마다 뜻이 달라 비운다. 직접 고친 문장은 지우지 않는다
+      // ('처음 문장으로'를 눌러야 새 상황의 문장으로 바뀐다).
+      return { ...state, kind: action.kind, detail: "", copied: "idle" };
     case "name":
       return { ...state, name: action.value.slice(0, NAME_MAX), copied: "idle" };
     case "detail":
@@ -123,10 +125,19 @@ export function askReducer(state: AskState, action: AskAction): AskState {
     case "regenerate":
       return { ...state, edited: null, copied: "idle" };
     case "copied":
+      // 복사하는 사이 문장이 바뀌었으면 결과를 표시하지 않는다 (바뀐 문장이 복사된 것처럼 보이지 않게)
+      if (action.text !== currentText(state)) return state;
+      // 빈 문장은 복사 성공으로 표시하지 않는다
+      if (!canSend(action.text)) return { ...state, copied: "failed" };
       return { ...state, copied: action.ok ? "copied" : "failed" };
     case "reset":
       return initialAskState;
   }
+}
+
+/** 보낼 내용이 있는지 (공백뿐이면 복사·메시지 앱 버튼을 끈다) */
+export function canSend(text: string): boolean {
+  return text.trim().length > 0;
 }
 
 /** 지금 화면에 보일(보낼) 문장 */

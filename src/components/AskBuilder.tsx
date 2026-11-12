@@ -10,6 +10,7 @@ import {
   NAME_MAX,
   SOFTENER,
   askReducer,
+  canSend,
   currentText,
   initialAskState,
   smsHref,
@@ -24,12 +25,16 @@ export default function AskBuilder() {
   const ids = { detail: useId(), name: useId(), text: useId(), status: useId() };
   const option = ASK_OPTIONS.find((o) => o.kind === state.kind) ?? ASK_OPTIONS[0];
   const text = currentText(state);
+  const sendable = canSend(text);
 
   async function copy() {
+    // 복사를 시작할 때의 문장. 끝났을 때 문장이 그대로일 때만 '복사했어요'를 보여 준다 (reducer가 비교).
+    const target = text;
+    if (!canSend(target)) return;
     let ok = false;
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(target);
         ok = true;
       }
     } catch {
@@ -44,7 +49,7 @@ export default function AskBuilder() {
         ok = false;
       }
     }
-    dispatch({ type: "copied", ok });
+    dispatch({ type: "copied", ok, text: target });
   }
 
   return (
@@ -121,7 +126,7 @@ export default function AskBuilder() {
             className={`min-h-12 w-full rounded border border-line bg-surface px-3 ${focusRing}`}
           />
           <p id={`${ids.name}-note`} className="text-sm text-muted">
-            이름은 저장하지 않아요. 이 화면을 나가면 사라져요.
+            이름과 문장은 이 기기나 서버에 저장하지 않아요. 다 쓰면 아래 ‘입력 지우고 처음부터’로 지울 수 있어요.
           </p>
         </div>
       </div>
@@ -157,7 +162,7 @@ export default function AskBuilder() {
         />
         {state.edited !== null && (
           <p className="flex flex-wrap items-center gap-2 text-sm">
-            <span>직접 고친 문장이에요. 위에서 바꾼 내용은 이 문장에 들어가지 않아요.</span>
+            <span>직접 고친 문장이에요. 위에서 상황·이름을 바꿔도 이 문장은 그대로예요. 새로 만들려면 ‘처음 문장으로’를 눌러요.</span>
             <button
               type="button"
               onClick={() => dispatch({ type: "regenerate" })}
@@ -169,28 +174,41 @@ export default function AskBuilder() {
         )}
       </section>
 
-      {/* 4. 직접 보내기 */}
+      {/* 4. 직접 보내기: 복사가 먼저 (메시지 앱 본문 채우기는 휴대폰마다 다를 수 있음) */}
       <div className="space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
-          <a
-            href={smsHref(text)}
-            className={`pastel-fill flex min-h-12 items-center justify-center rounded-full px-5 text-center font-semibold ${focusRing}`}
-          >
-            메시지 앱으로
-          </a>
           <button
             type="button"
             onClick={() => void copy()}
+            disabled={!sendable}
             aria-describedby={ids.status}
-            className={`flex min-h-12 items-center justify-center rounded-full border border-fg px-5 font-semibold hover:bg-tint-sky ${focusRing}`}
+            className={`pastel-fill flex min-h-12 items-center justify-center rounded-full px-5 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`}
           >
             복사하기
           </button>
+          {sendable ? (
+            <a
+              href={smsHref(text)}
+              className={`flex min-h-12 items-center justify-center rounded-full border border-fg px-5 text-center font-semibold hover:bg-tint-sky ${focusRing}`}
+            >
+              메시지 앱으로
+            </a>
+          ) : (
+            <button
+              type="button"
+              disabled
+              className="flex min-h-12 cursor-not-allowed items-center justify-center rounded-full border border-fg px-5 font-semibold opacity-50"
+            >
+              메시지 앱으로
+            </button>
+          )}
         </div>
         <p id={ids.status} aria-live="polite" className="min-h-6 text-sm">
-          {state.copied === "copied" && "복사했어요. 카카오톡이나 메시지 앱에 붙여 넣어 직접 보내 주세요."}
-          {state.copied === "failed" && "복사하지 못했어요. 문장을 길게 눌러 직접 복사해 주세요."}
+          {!sendable && "보낼 문장이 비어 있어요. 문장을 쓰거나 ‘처음 문장으로’를 눌러 주세요."}
+          {sendable && state.copied === "copied" && "복사했어요. 카카오톡이나 메시지 앱에 붙여 넣어 직접 보내 주세요."}
+          {sendable && state.copied === "failed" && "복사하지 못했어요. 문장을 길게 눌러 직접 복사해 주세요."}
         </p>
+        <p className="text-sm text-muted">휴대폰에 따라 메시지 앱에 문장이 채워지지 않을 수 있어요. 그럴 땐 복사해서 붙여 넣어 주세요.</p>
       </div>
 
       <section aria-labelledby="ask-after" className="space-y-2 border-t border-line pt-4 text-[0.95rem]">
