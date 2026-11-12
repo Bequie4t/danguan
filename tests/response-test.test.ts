@@ -112,3 +112,27 @@ test("다른 ID 재시도는 불일치로 표시하고 취소 뒤에는 비교�
   await control.fetch(url, { method: "POST", body: '{"p_id":"third"}' });
   assert.equal(messages.length, count);
 });
+
+test("홈 시험(new): 확인 뒤 생성 요청이 새 ID면 예상대로, 같은 ID면 경고", async () => {
+  const url = `${TEST_DATABASE}/rest/v1/rpc/create_checkin`;
+  const body = (id: string) => ({ method: "POST", body: JSON.stringify({ p_id: id }) });
+  for (const [second, expected] of [["id-2", /새 ID로 생성 요청을 보냈습니다\(예상대로\)/], ["id-1", /예상과 다릅니다/]] as const) {
+    const messages: string[] = [];
+    const control = createResponseLossTest(async () => new Response("{}", { status: 200 }), (m) => messages.push(m));
+    control.arm("new");
+    await assert.rejects(control.fetch(url, body("id-1")), TypeError);
+    assert.match(messages[0], /저장됐는지 확인하기/);
+    await control.fetch(url, body(second));
+    assert.match(messages.at(-1)!, expected);
+  }
+});
+
+test("기본(same) 시험 문구는 그대로: 재시도가 같은 ID면 통과 안내", async () => {
+  const url = `${TEST_DATABASE}/rest/v1/rpc/create_checkin`;
+  const messages: string[] = [];
+  const control = createResponseLossTest(async () => new Response("{}", { status: 200 }), (m) => messages.push(m));
+  control.arm();
+  await assert.rejects(control.fetch(url, { method: "POST", body: JSON.stringify({ p_id: "id-1" }) }), TypeError);
+  await control.fetch(url, { method: "POST", body: JSON.stringify({ p_id: "id-1" }) });
+  assert.match(messages.at(-1)!, /최초 요청과 같습니다/);
+});

@@ -11,6 +11,8 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
   let holdWrite: string | null = null;
   let generation = 0;
   let retryId: string | null = null;
+  // same: 오늘 기록 화면처럼 재시도가 같은 ID여야 함. new: 홈처럼 확인은 조회만 하고, 다음 생성은 새 ID여야 함.
+  let expect: "same" | "new" = "same";
   let release: (() => void) | null = null;
   const wrapped: typeof fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), typeof location === "undefined" ? TEST_DATABASE : location.href);
@@ -25,9 +27,13 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
         requestId = typeof body?.p_id === "string" ? body.p_id : null;
       } catch { /* 비교할 수 없으면 미확인으로 표시한다. 요청은 정상 전달한다. */ }
       if (!armed && retryId !== null) {
-        notify(requestId === null ? "재시도 요청 ID를 확인하지 못했습니다." : requestId === retryId
-          ? "재시도 요청 ID가 최초 요청과 같습니다. DB 기록 수와 저장 완료도 확인하세요."
-          : "재시도 요청 ID가 최초 요청과 다릅니다. 시험을 멈추고 결과를 확인하세요.");
+        notify(requestId === null ? "재시도 요청 ID를 확인하지 못했습니다." : expect === "new"
+          ? (requestId === retryId
+            ? "홈에서 최초 요청과 같은 ID로 다시 생성 요청을 보냈습니다. 예상과 다릅니다. 시험을 멈추고 결과를 확인하세요."
+            : "홈 '새로 남기기'가 새 ID로 생성 요청을 보냈습니다(예상대로). 최초 ID의 기록이 되살아나지 않았는지 DB에서 확인하세요.")
+          : requestId === retryId
+            ? "재시도 요청 ID가 최초 요청과 같습니다. DB 기록 수와 저장 완료도 확인하세요."
+            : "재시도 요청 ID가 최초 요청과 다릅니다. 시험을 멈추고 결과를 확인하세요.");
         retryId = null;
       }
     }
@@ -71,14 +77,18 @@ export function createResponseLossTest(original: typeof fetch, notify: (message:
       notify("서버가 거절하여 응답 유실 시험은 적용되지 않았습니다. 다시 준비해 주세요.");
       return response;
     }
-    notify(requestId === null
-      ? "서버 성공 응답을 중단했습니다. 요청 ID는 확인하지 못했습니다. 입력 유지 확인 후 다시 저장하기를 누르세요."
-      : "서버 성공 응답을 중단하고 최초 요청 ID를 비교용으로 보관했습니다. 입력 유지 확인 후 다시 저장하기를 한 번 누르세요.");
+    notify(expect === "new"
+      ? "서버 성공 응답을 중단했습니다(기록은 저장됨). 홈의 실패 안내를 확인한 뒤 ‘저장됐는지 확인하기’를 누르세요. 확인은 조회만 하므로 생성 요청이 다시 가지 않아야 합니다."
+      : requestId === null
+        ? "서버 성공 응답을 중단했습니다. 요청 ID는 확인하지 못했습니다. 입력 유지 확인 후 다시 저장하기를 누르세요."
+        : "서버 성공 응답을 중단하고 최초 요청 ID를 비교용으로 보관했습니다. 입력 유지 확인 후 다시 저장하기를 한 번 누르세요.");
     throw new TypeError("Synthetic response loss");
   };
   return {
     fetch: wrapped,
-    arm: () => { generation++; retryId = null; release?.(); armed = true; holdList = false; holdWrite = null; },
+    arm: (mode: "same" | "new" = "same") => {
+      generation++; retryId = null; release?.(); armed = true; holdList = false; holdWrite = null; expect = mode;
+    },
     holdNextList: () => { generation++; retryId = null; release?.(); holdList = true; armed = false; holdWrite = null; },
     holdNextWrite: (operation: "create_checkin" | "update_checkin" | "delete_checkin") => {
       generation++; retryId = null; release?.(); holdWrite = operation; armed = false; holdList = false;
