@@ -1399,6 +1399,91 @@ try {
       }
     });
 
+    await scenario("힘든 날 카드: 처음에 카드가 없던 탭에서도, 미리보기의 카드가 지워지면 미리보기·덮어쓰기 확인을 닫고 초안은 남김", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); // 빈 상태
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByLabel("먹을 것 1").fill("가상 다른 탭 카드");
+        await other.getByLabel("먼저 부탁할 사람").fill("가상지운이름");
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await other.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByLabel("먹을 것 1").fill("가상 빈 탭 초안");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.locator("[data-conflict-preview]").waitFor();
+        assert.match(await page.locator("[data-conflict-preview]").innerText(), /가상지운이름/);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 미리보기의 카드를 지웠어요.", { exact: false }).waitFor();
+        assert.equal(await page.locator("[data-conflict-preview]").count(), 0, "지운 카드가 미리보기에 남음");
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상지운이름"), "지운 이름이 화면에 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 빈 탭 초안", "초안이 사라짐");
+        // 지금 상태(카드 없음)는 처음과 같으니 그대로 저장됨
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장을 기다리는 중 화면을 떠나면 철회 — 잠금이 풀려도 저장되지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await holdLock(other);
+        await page.getByLabel("먹을 것 1").fill("가상 떠난 화면의 초안");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "저장 취소" }).waitFor();
+        // 같은 문서 안에서 다른 화면으로 (머리글 링크로 화면이 바뀌는 경우와 같음: 카드 화면이 닫힘)
+        await page.evaluate(() => window.__fixture.mount("help"));
+        await page.locator('[data-help-number="109"]').waitFor();
+        await other.evaluate(() => window.__release());
+        await page.waitForTimeout(500);
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null, "떠난 화면의 저장이 실행됨");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 키보드로 저장·지우기를 누르면 기다리는 동안 '취소'에 초점, 취소하면 원래 버튼으로 돌아옴", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      const other = await context.newPage();
+      const focused = () => page.evaluate(() => document.activeElement?.textContent?.trim());
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.getByRole("button", { name: "저장 취소" }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "저장 취소");
+        await page.keyboard.press("Enter");
+        await page.getByText("저장을 취소했어요.", { exact: false }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "이 기기에 저장하기").catch(async () => { throw new Error(`취소 뒤 초점이 돌아오지 않음: ${await focused()}`); });
+        await other.evaluate(() => window.__release());
+        // 지우기도 같은 방식
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).focus();
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "취소");
+        await page.keyboard.press("Enter");
+        await page.getByText("지우기를 취소했어요.", { exact: false }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "이 기기에서 지우기").catch(async () => { throw new Error(`지우기 취소 뒤 초점이 돌아오지 않음: ${await focused()}`); });
+        await other.evaluate(() => window.__release());
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
     await scenario("힘든 날 카드: 탭 사이 잠금을 쓸 수 없는 브라우저는 저장·지우기를 막고, 기존 카드 보기·이번에만 보기는 그대로", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       await sneakWrite("가상 잠금 없는 브라우저의 기존 카드");
@@ -1406,7 +1491,11 @@ try {
       await page.evaluate(() => window.__fixture.mount("hardday"));
       await page.getByText("가상 잠금 없는 브라우저의 기존 카드", { exact: false }).first().waitFor();
       assert.equal(await page.getByRole("button", { name: "이 기기에서 지우기" }).isDisabled(), true);
-      await page.getByText("이 사이트의 데이터만", { exact: false }).waitFor();
+      await page.getByText("이 사이트의 데이터만", { exact: false }).waitFor().catch(() => {});
+      const hint = await page.locator("#root").innerText();
+      assert.ok(hint.includes(new URL(base).host), "지울 사이트 주소를 보여 주지 않음");
+      assert.ok(hint.includes("‘모든 웹사이트 데이터 제거’는 누르지 마세요"));
+      assert.ok(hint.includes("서버에 저장된 계정 기록은 지워지지 않아요"));
       await page.getByRole("button", { name: "카드 고치기" }).click();
       await page.getByLabel("먹을 것 1").fill("가상 메뉴");
       assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);

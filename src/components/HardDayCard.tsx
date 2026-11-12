@@ -52,6 +52,7 @@ type Notice =
   | "removed-elsewhere-kept"
   | "changed-elsewhere"
   | "changed-while-editing"
+  | "preview-removed"
   | "save-cancelled"
   | "clear-cancelled"
   | "lock-busy"
@@ -127,13 +128,24 @@ export default function HardDayCard() {
   const [busy, setBusy] = useState<null | "save" | "clear">(null);
   /** 기다리는 요청을 철회하는 신호 (취소하면 잠금을 얻어도 실행하지 않음) */
   const pending = useRef<AbortController | null>(null);
+  // 키보드 초점: 기다리는 동안 '취소'로 옮기고, 끝나면 원래 자리로 돌려준다
+  const cancelSaveRef = useRef<HTMLButtonElement>(null);
+  const cancelClearRef = useRef<HTMLButtonElement>(null);
+  const deleteOpenRef = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef<(() => void) | null>(null);
+  const [hostname, setHostname] = useState("");
   /** 탭 사이 잠금을 쓸 수 있는지. 없으면 저장·지우기를 하지 않는다 */
   const [lockable, setLockable] = useState(true);
   const locks = useRef<LockManagerLike | null>(null);
   const msgRef = useRef<HTMLTextAreaElement>(null);
-  const live = useRef({ phase: "loading" as Phase, temporary: false, draft: emptyDraft() });
+  const live = useRef({
+    phase: "loading" as Phase,
+    temporary: false,
+    draft: emptyDraft(),
+    conflictRaw: undefined as string | null | undefined,
+  });
   const uid = useId();
-  live.current = { phase, temporary, draft };
+  live.current = { phase, temporary, draft, conflictRaw: conflict ? conflict.currentRaw : undefined };
   const confirmClear = confirmRaw !== null;
 
   /** 저장소를 한 번 읽은 값으로 화면을 맞춘다 (처음 열 때·다시 불러올 때) */
@@ -166,6 +178,7 @@ export default function HardDayCard() {
   useEffect(() => {
     store.current = browserStore();
     locks.current = browserLocks();
+    setHostname(window.location.host);
     setLockable(locks.current !== null);
     applySnapshot(snapshot(store.current));
 
@@ -173,7 +186,15 @@ export default function HardDayCard() {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== STORAGE_KEY && e.key !== null) return;
       const now = readRaw(store.current); // 한 번만 읽은 값으로 판단
-      if (now === undefined || now === baseRaw.current) return;
+      if (now === undefined) return;
+      // 충돌 미리보기에 보여 주던 카드는 편집 시작 때의 카드와 따로 비교한다
+      // (처음에 카드가 없던 탭에서도, 미리보기의 카드가 지워지거나 바뀌면 미리보기·덮어쓰기 확인을 닫는다)
+      const previewRaw = live.current.conflictRaw;
+      if (previewRaw !== undefined && now !== previewRaw) {
+        setConflict(null);
+        setNotice(now === null ? "preview-removed" : "changed-while-editing");
+      }
+      if (now === baseRaw.current) return;
       setConfirmRaw(null); // 확인하던 카드가 바뀌었으니 지우기 확인은 닫는다
       setConflict(null); // 이전 버전에 대한 덮어쓰기 확인·미리보기는 더 이상 맞지 않는다 (저장하면 새로 확인)
       const { phase: ph, temporary: temp, draft: d } = live.current;
@@ -194,9 +215,24 @@ export default function HardDayCard() {
       setNotice(now === null ? "removed-elsewhere-kept" : "changed-while-editing");
     };
     window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      // 카드 화면을 떠나면 기다리던 저장·지우기도 철회한다 (떠난 뒤 잠금이 풀려도 실행하지 않음)
+      pending.current?.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 기다리기 시작하면 '취소'로 초점을 옮기고, 끝나면(취소·시간 초과·실패) 원래 자리로 돌려준다
+  useEffect(() => {
+    if (busy === "save") cancelSaveRef.current?.focus();
+    else if (busy === "clear") cancelClearRef.current?.focus();
+    else if (restoreFocus.current) {
+      const back = restoreFocus.current;
+      restoreFocus.current = null;
+      back();
+    }
+  }, [busy]);
 
   const problems = draft.foods.map((f) => urlProblem(f.url));
   const valid = hasContent(draft) && problems.every((p) => p === null);
@@ -209,6 +245,10 @@ export default function HardDayCard() {
     const expected = overwrite && conflict ? conflict.currentRaw : baseRaw.current;
     const ctrl = new AbortController();
     pending.current = ctrl;
+    const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    restoreFocus.current = () => {
+      if (from && from.isConnected && !(from as HTMLButtonElement).disabled) from.focus();
+    };
     setBusy("save");
     // 잠금 안에서 다시 읽어 비교한 뒤 쓴다 (다른 탭의 저장·지우기가 끼어들지 못함). 기다리는 동안 취소할 수 있다.
     const locked = await withCardLock(locks.current, () => saveCard(store.current, card, expected), LOCK_TIMEOUT_MS, ctrl.signal);
@@ -268,6 +308,7 @@ export default function HardDayCard() {
     const expected = confirmRaw;
     const ctrl = new AbortController();
     pending.current = ctrl;
+    restoreFocus.current = () => deleteOpenRef.current?.focus();
     setBusy("clear");
     const locked = await withCardLock(locks.current, () => clearCard(store.current, expected), LOCK_TIMEOUT_MS, ctrl.signal);
     pending.current = null;
@@ -329,6 +370,7 @@ export default function HardDayCard() {
     "removed-elsewhere-kept": "다른 창에서 저장된 카드를 지웠어요. 이 화면에 따로 적은 내용은 그대로 있어요. 저장하려면 한 번 더 확인해요.",
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
+    "preview-removed": "다른 창에서 미리보기의 카드를 지웠어요. 적은 내용은 그대로 있어요. 저장하면 다시 확인해요.",
     "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",
     "clear-cancelled": "지우기를 취소했어요. 카드는 그대로 있어요.",
     "lock-busy": "다른 창에서 카드를 저장하거나 지우는 중이에요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 눌러 주세요.",
@@ -526,6 +568,7 @@ export default function HardDayCard() {
               </p>
               <button
                 type="button"
+                ref={cancelSaveRef}
                 onClick={() => pending.current?.abort()}
                 className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold ${focusRing}`}
               >
@@ -667,6 +710,7 @@ export default function HardDayCard() {
             type="button"
             disabled={!lockable || busy !== null}
             aria-describedby={!lockable ? `${uid}-nolock` : undefined}
+            ref={deleteOpenRef}
             onClick={() => setConfirmRaw(baseRaw.current)}
             className={`min-h-11 rounded-full border border-line px-4 text-sm disabled:cursor-not-allowed disabled:opacity-60 ${focusRing}`}
           >
@@ -688,9 +732,11 @@ export default function HardDayCard() {
               </button>
               <button
                 type="button"
+                ref={cancelClearRef}
                 onClick={() => {
                   pending.current?.abort(); // 기다리는 지우기 요청을 철회 — 잠금이 풀려도 지우지 않음
                   setConfirmRaw(null);
+                  if (!busy) requestAnimationFrame(() => deleteOpenRef.current?.focus());
                 }}
                 className={`min-h-11 rounded-full border border-line px-5 ${focusRing}`}
               >
@@ -700,11 +746,27 @@ export default function HardDayCard() {
           </div>
         )}
         {!temporary && !lockable && (
-          <p id={`${uid}-nolock`} className="text-sm">
-            이 브라우저에서는 여러 창 사이에 안전하게 지울 수 없어 지우기 버튼을 껐어요. 지우려면 브라우저 설정에서{" "}
-            <strong>이 사이트의 데이터만</strong> 지울 수 있어요. 예: 크롬은 주소창 왼쪽 아이콘 → 사이트 설정 → 데이터 삭제, 아이폰은 설정 →
-            Safari → 고급 → 웹사이트 데이터에서 이 사이트를 지워요.
-          </p>
+          <div id={`${uid}-nolock`} className="space-y-2 text-sm">
+            <p>
+              이 브라우저에서는 여러 창 사이에 안전하게 지울 수 없어 지우기 버튼을 껐어요. 지우려면 브라우저 설정에서{" "}
+              <strong>이 사이트{hostname ? ` (${hostname})` : ""}의 데이터만</strong> 골라 지워 주세요. 주소창에 보이는 이 사이트 주소만
+              고르면 돼요.
+            </p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>
+                컴퓨터 크롬: 설정 → 개인 정보 보호 및 보안 → 서드 파티 쿠키 → 모든 사이트 데이터 및 권한 보기 → 이 사이트 주소를 검색해
+                삭제 아이콘. (메뉴 이름은 버전에 따라 조금 다를 수 있어요.)
+              </li>
+              <li>
+                아이폰 Safari: 설정 → 앱 → Safari → 고급 → 웹사이트 데이터에서 이 사이트 항목만 지워요.{" "}
+                <strong>‘모든 웹사이트 데이터 제거’는 누르지 마세요</strong> (다른 사이트의 정보까지 지워져요).
+              </li>
+            </ul>
+            <p>
+              지우면 카드뿐 아니라 이 브라우저의 로그인 상태와 이 사이트 설정도 지워질 수 있어요. 서버에 저장된 계정 기록은 지워지지
+              않아요.
+            </p>
+          </div>
         )}
       </section>
     </div>
