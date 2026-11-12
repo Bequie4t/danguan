@@ -514,18 +514,19 @@ try {
     });
 
     // 도움 화면: 색 대비 계산 (CSS 색을 캔버스로 sRGB로 바꿔 WCAG 대비를 구함)
-    const helpContrast = () => page.evaluate(() => {
+    const helpContrast = (extra = "") => page.evaluate((extra) => {
       const cv = document.createElement("canvas"); cv.width = cv.height = 1;
       const cx = cv.getContext("2d", { willReadFrequently: true });
       const rgba = (c) => { cx.clearRect(0, 0, 1, 1); cx.fillStyle = "#000"; cx.fillStyle = c; cx.fillRect(0, 0, 1, 1); const d = cx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
-      const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 0.99) return c; } return rgba(getComputedStyle(document.body).backgroundColor); };
+      // 배경이 그라데이션이면 그 안의 색 모두와 비교해 가장 낮은 대비를 쓴다
+      const bgsOf = (el) => { for (let e = el; e; e = e.parentElement) { const st = getComputedStyle(e); const g = st.backgroundImage.match(/rgba?\([^)]*\)/g); if (g && st.backgroundImage.includes("gradient")) return g.map(rgba); const c = rgba(st.backgroundColor); if (c[3] > 0.99) return [c]; } return [rgba(getComputedStyle(document.body).backgroundColor)]; };
       const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-      const ratio = (el) => { const bg = bgOf(el); let fg = rgba(getComputedStyle(el).color); fg = [0, 1, 2].map((i) => fg[i] * fg[3] + bg[i] * (1 - fg[3])); const a = lum(fg), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+      const ratio = (el) => Math.min(...bgsOf(el).map((bg) => { const c = rgba(getComputedStyle(el).color); const fg = [0, 1, 2].map((i) => c[i] * c[3] + bg[i] * (1 - c[3])); const a = lum(fg), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); }));
       const out = [];
       for (const card of document.querySelectorAll("[data-help-number]")) for (const span of card.querySelectorAll("span")) if (span.children.length === 0 && span.textContent.trim()) out.push({ text: span.textContent.trim().slice(0, 12), ratio: Math.round(ratio(span) * 100) / 100 });
-      for (const el of document.querySelectorAll("main p, main h1, main h2, main a[download], main li")) if (el.textContent.trim()) out.push({ text: el.textContent.trim().slice(0, 12), ratio: Math.round(ratio(el) * 100) / 100 });
+      for (const el of document.querySelectorAll("main p, main h1, main h2, main a[download], main li" + extra)) if (el.textContent.trim()) out.push({ text: el.textContent.trim().slice(0, 12), ratio: Math.round(ratio(el) * 100) / 100 });
       return out;
-    });
+    }, extra);
 
     await scenario("도움 화면: 109가 맨 위·가장 크게, 모든 번호가 전화 링크, 저장·출처·확인 날짜 유지", async () => {
       await page.goto(`${base}/?screen=help`);
@@ -663,6 +664,111 @@ try {
         }
       });
     }
+
+    // ── 부탁하기 (4단계): 로그인·저장과 무관, 앱이 대신 보내지 않음 ──
+    const askSel = ", main legend, main label, main label span, main button, main a, main .eyebrow";
+    const openAsk = async () => {
+      await page.goto(`${base}/?screen=ask`);
+      await page.getByRole("heading", { name: /할 일 하나를 건네요/ }).waitFor();
+    };
+    const sentence = () => page.getByRole("textbox", { name: "보낼 문장" });
+
+    await scenario("부탁하기: 상황 고르기 → 문장 → 이름·칸 반영 → 직접 고치면 유지 → '처음 문장으로'", async () => {
+      const requests = [];
+      const onReq = (r) => requests.push(r.url());
+      page.on("request", onReq);
+      await openAsk();
+      const before = await page.evaluate(() => ({ ls: localStorage.length, ss: sessionStorage.length }));
+      requests.length = 0;
+      assert.match(await sentence().inputValue(), /^병원 가는 날 같이 가 줄 수 있어\?.*어려우면 편하게 말해 줘/);
+      await page.getByRole("radio", { name: /밥 시켜 주기/ }).check();
+      await page.getByLabel("먹고 싶은 것 (선택)").fill("죽");
+      await page.getByLabel("받는 사람 이름 (선택)").fill("민지");
+      assert.equal(await sentence().inputValue(), "민지야, 오늘 밥 좀 시켜 줄 수 있어? 이거면 돼: 죽. 어려우면 편하게 말해 줘. 괜찮아.");
+      await page.getByRole("checkbox", { name: /부담을 덜어 주는 한마디/ }).uncheck();
+      assert.ok(!(await sentence().inputValue()).includes("어려우면"));
+      // 직접 고치기: 다른 칸을 바꿔도 덮어쓰지 않음
+      await sentence().fill("가상 직접 쓴 부탁");
+      await page.getByLabel("받는 사람 이름 (선택)").fill("지훈");
+      assert.equal(await sentence().inputValue(), "가상 직접 쓴 부탁");
+      await page.getByRole("button", { name: "처음 문장으로" }).click();
+      assert.match(await sentence().inputValue(), /^지훈아, 오늘 밥 좀/);
+      // 메시지 앱 링크: 번호 없이 본문만
+      const href = await page.getByRole("link", { name: "메시지 앱으로" }).getAttribute("href");
+      assert.ok(href.startsWith("sms:?&body="));
+      assert.equal(decodeURIComponent(href.slice(11)), await sentence().inputValue());
+      // 도움 연결 유지, 저장·네트워크 없음
+      assert.equal(await page.locator('main a[href="/help"]').count(), 1);
+      const after = await page.evaluate(() => ({ ls: localStorage.length, ss: sessionStorage.length }));
+      page.off("request", onReq);
+      assert.deepEqual(after, before, "브라우저 저장소에 쓰지 않음");
+      assert.deepEqual(requests, [], "부탁하기 화면에서 네트워크 요청 없음");
+      // 입력 지우기
+      await page.getByRole("button", { name: "입력 지우고 처음부터" }).click();
+      assert.equal(await page.getByLabel("받는 사람 이름 (선택)").inputValue(), "");
+      assert.match(await sentence().inputValue(), /^병원 가는 날/);
+    });
+
+    await scenario("부탁하기: 복사하면 '복사했어요'만 안내하고 '보냈어요'라고 하지 않음", async () => {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+      await openAsk();
+      await page.getByLabel("받는 사람 이름 (선택)").fill("Alex");
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.getByText("복사했어요.", { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), await sentence().inputValue());
+      const text = await page.locator("#root").innerText();
+      assert.ok(!/보냈어요|전송 완료|발송 완료/.test(text));
+      assert.ok(text.includes("직접 보내 주세요"));
+      // 내용을 바꾸면 복사 안내는 사라진다 (바뀐 문장을 복사한 것처럼 보이지 않게)
+      await page.getByLabel("받는 사람 이름 (선택)").fill("Sam");
+      assert.equal(await page.getByText("복사했어요.", { exact: false }).count(), 0);
+      await context.clearPermissions();
+    });
+
+    await scenario("부탁하기: 복사 권한이 없어도 화면이 멈추지 않고 안내", async () => {
+      await openAsk();
+      await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("denied")) }, configurable: true }); document.execCommand = () => false; });
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.getByText("복사하지 못했어요.", { exact: false }).waitFor();
+    });
+
+    await scenario("부탁하기: 키보드만으로 상황 고르기·복사 버튼까지 이동, 초점 표시", async () => {
+      await openAsk();
+      await page.getByRole("radio", { name: /병원에 같이 가 주기/ }).focus();
+      await page.keyboard.press("ArrowDown");
+      assert.equal(await page.getByRole("radio", { name: /밥 시켜 주기/ }).isChecked(), true, "화살표로 상황 바꾸기");
+      let found = false;
+      for (let i = 0; i < 12 && !found; i++) {
+        await page.keyboard.press("Tab");
+        found = await page.evaluate(() => document.activeElement?.textContent?.trim() === "복사하기");
+      }
+      assert.ok(found, "Tab으로 복사하기에 닿지 않음");
+      assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle), "none", "키보드 초점 표시 없음");
+      const small = await page.locator("main input, main textarea, main button, main a").evaluateAll((els) => els.map((e) => { const l = e.closest("label") ?? e; const r = l.getBoundingClientRect(); return { t: (e.textContent || e.getAttribute("type") || e.tagName).trim().slice(0, 10), h: r.height }; }).filter((x) => x.h < 44));
+      assert.deepEqual(small, [], "누르는 영역이 44px보다 작음");
+    });
+
+    for (const scheme of ["light", "dark"]) {
+      await scenario(`부탁하기: ${scheme === "dark" ? "어두운" : "밝은"} 화면 글씨 대비 4.5:1 이상`, async () => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await openAsk();
+        await page.getByRole("button", { name: "복사하기" }).focus();
+        const low = (await helpContrast(askSel)).filter((x) => x.ratio < 4.5);
+        await page.emulateMedia({ colorScheme: "light" });
+        assert.deepEqual(low, [], "글씨 대비 4.5:1 미만");
+      });
+    }
+
+    await scenario("부탁하기: 200% 확대(폭 절반)에서도 가로로 넘치지 않음", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await openAsk();
+      await page.getByLabel("받는 사람 이름 (선택)").fill("가".repeat(20));
+      await page.getByLabel("언제 가요? (선택)").fill("나".repeat(30));
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.setViewportSize(vp);
+      assert.ok(overflow <= 0, `가로로 ${overflow}px 넘침`);
+    });
 
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");

@@ -9,6 +9,7 @@ import ConsentForm from "../../src/components/ConsentForm";
 import HomeCheckin from "../../src/components/HomeCheckin";
 import HelpPage from "../../src/app/help/page";
 import HeaderNav from "../../src/components/HeaderNav";
+import AskPage from "../../src/app/ask/page";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -77,6 +78,8 @@ export const fixture = {
     if (screen === "form-help") { root.render(<><a href="/help-target" data-leave-ok="">도움이 필요해요</a> <a href="/elsewhere">다른 화면</a><AuthScope><Probe /><React.Fragment key={++screenGeneration}><CheckinForm /></React.Fragment></AuthScope></>); return; }
     // 머리글 메뉴 + 기록 작성 화면 (지금 화면 링크를 다시 눌러도 입력이 남는지)
     if (screen === "today-nav") { root.render(<><HeaderNav /><AuthScope><Probe /><React.Fragment key={++screenGeneration}><CheckinForm /></React.Fragment></AuthScope></>); return; }
+    // 부탁하기도 로그인·저장과 무관: AuthScope 없이 렌더한다.
+    if (screen === "ask") { root.render(<React.Fragment key={++screenGeneration}><AskPage /></React.Fragment>); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
