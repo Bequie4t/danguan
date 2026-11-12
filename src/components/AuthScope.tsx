@@ -47,7 +47,22 @@ async function currentSessionAuth(): Promise<SessionAuth | null> {
   return s?.user?.id && s.access_token ? { uid: s.user.id, accessToken: s.access_token } : null;
 }
 
-export default function AuthScope({ children, redirectOnLogout = true }: { children: ReactNode; redirectOnLogout?: boolean }) {
+/** redirectOnLogout가 false일 때 각 상태에서 대신 보여 줄 화면 (예: 홈의 로그인 전 화면). 없으면 기본 안내. */
+export interface AuthScopeFallbacks {
+  checking?: ReactNode;
+  out?: ReactNode;
+  unconfigured?: ReactNode;
+}
+
+export default function AuthScope({
+  children,
+  redirectOnLogout = true,
+  fallbacks,
+}: {
+  children: ReactNode;
+  redirectOnLogout?: boolean;
+  fallbacks?: AuthScopeFallbacks;
+}) {
   const [guard, setGuard] = useState<SessionGuard | null>(null);
   const [view, setView] = useState<View>({ kind: "checking" });
 
@@ -126,9 +141,11 @@ export default function AuthScope({ children, redirectOnLogout = true }: { child
   }, [redirectOnLogout]);
 
   if (view.kind === "unconfigured") {
+    if (fallbacks?.unconfigured) return <>{fallbacks.unconfigured}</>;
     return <p className="text-muted">서버 설정이 아직 되지 않았어요. 도움 화면은 그대로 열려요.</p>;
   }
   if (view.kind === "out") {
+    if (!redirectOnLogout && fallbacks?.out) return <>{fallbacks.out}</>;
     return <p className="text-muted">로그인 화면으로 이동하는 중이에요…</p>;
   }
   if (view.kind === "error") {
@@ -140,6 +157,7 @@ export default function AuthScope({ children, redirectOnLogout = true }: { child
     );
   }
   if (view.kind !== "in" || !guard) {
+    if (fallbacks?.checking) return <>{fallbacks.checking}</>;
     return <p className="text-muted">로그인 상태를 확인하는 중이에요…</p>;
   }
   return (

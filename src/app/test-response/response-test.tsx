@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import AuthScope from "@/components/AuthScope";
 import CheckinForm from "@/components/CheckinForm";
+import HomeCheckin from "@/components/HomeCheckin";
 import RecordList from "@/components/RecordList";
 import { createResponseLossTest } from "@/lib/checkins/responseTest";
 
 export default function ResponseTest() {
   const control = useRef<ReturnType<typeof createResponseLossTest> | null>(null);
   const [ready, setReady] = useState(false);
-  const [screen, setScreen] = useState<"form" | "records">("form");
+  const [screen, setScreen] = useState<"form" | "records" | "home">("form");
   const [message, setMessage] = useState("준비 중…");
   useEffect(() => {
     const original = window.fetch;
@@ -37,6 +38,15 @@ export default function ResponseTest() {
         control.current?.cancel();
         setMessage("시험 준비를 취소했습니다. 다음 요청은 정상 처리됩니다.");
       }} className="ml-2 rounded-lg border border-line px-3 py-2">시험 준비 취소</button>
+      <h2 className="mt-5 font-semibold">홈 한 번 눌러 남기기 — 응답 유실 시험</h2>
+      <p className="my-3">테스트 계정 A만 사용하세요. 준비 후 홈에서 버거움 버튼을 한 번 누르면 서버는 저장하지만 성공 응답만 중단합니다. ‘저장됐는지 확인하기’는 조회만 해야 하고 생성 요청을 다시 보내면 안 됩니다. 삭제 시험은 다른 탭의 ‘내 기록’에서 그 가상 기록을 지운 뒤 확인을 누르세요.</p>
+      <button type="button" disabled={!ready} onClick={() => {
+        setScreen("home");
+        control.current?.arm("new");
+        setMessage("준비됐습니다. 아래 홈에서 버거움 버튼을 한 번 누르세요.");
+      }} className="rounded-lg border border-line px-3 py-2">홈 응답 유실 시험 준비</button>
+      <button type="button" onClick={() => setScreen("home")} className="ml-2 rounded-lg border border-line px-3 py-2">홈 화면 보기</button>
+      <button type="button" onClick={() => setScreen("form")} className="ml-2 rounded-lg border border-line px-3 py-2">기록 화면 보기</button>
       <p role="status" className="mt-3">{message}</p>
       <h2 className="mt-5 font-semibold"> 계정 전환 후 지연 조회 시험</h2>
       <p className="my-3">A로 로그인한 상태에서 지연 조회 시작을 누르세요. 보류 안내가 뜨면 같은 주소의 다른 탭에서 로그아웃 후 B로 로그인하세요. 이 탭은 새로고침하지 마세요. B 기록 확인 후 보류 응답을 전달해도 A 기록이 나타나면 안 됩니다.</p>
@@ -60,6 +70,7 @@ export default function ResponseTest() {
         }}>{label}</button>)}
       <button type="button" className="ml-2 rounded-lg border border-line px-3 py-2" onClick={() => control.current?.release()}>보류 응답 전달</button>
     </section>
-    {ready && <AuthScope redirectOnLogout={false}>{screen === "form" ? <CheckinForm /> : <RecordList />}</AuthScope>}
+    {/* 홈 블록은 자체 AuthScope(로그아웃해도 이동하지 않음)를 가진다 */}
+    {ready && (screen === "home" ? <HomeCheckin /> : <AuthScope redirectOnLogout={false}>{screen === "form" ? <CheckinForm /> : <RecordList />}</AuthScope>)}
   </>;
 }

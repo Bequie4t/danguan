@@ -2,10 +2,11 @@
 // 인증·DB를 메모리 모의 응답으로 대체하고 실제 React 컴포넌트와 훅을 렌더한다.
 import React from "react";
 import { createRoot } from "react-dom/client";
-import AuthScope, { useScopedRequest } from "../../src/components/AuthScope";
+import AuthScope, { useAuthScope, useScopedRequest } from "../../src/components/AuthScope";
 import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
 import ConsentForm from "../../src/components/ConsentForm";
+import HomeCheckin from "../../src/components/HomeCheckin";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -47,7 +48,27 @@ export const fixture = {
   started(operation) { return gates.get(operation)?.started === true; },
   snapshot() { return { rows: [...rows.values()], calls: [...calls] }; },
   setConsent(uid, granted) { consents.set(uid, granted); },
+  /** 다른 기기에서 먼저 고친 것처럼 version만 올린다 (시험 전용) */
+  touch(id) { const r = rows.get(id); if (r) rows.set(id, { ...r, version: r.version + 1 }); },
+  /** 다른 탭에서 지운 것처럼 기록을 없앤다 (시험 전용) */
+  removeElsewhere(id) { rows.delete(id); },
+  /** 늦게 도착한 저장처럼 기록을 그대로 다시 넣는다 (시험 전용) */
+  putRow(row) { rows.set(row.id, { ...row }); },
+  /** 다른 탭에서 메모·생활 항목을 더한 것처럼 고친다 (version 증가, 시험 전용) */
+  editElsewhere(id, patch) { const r = rows.get(id); if (r) rows.set(id, { ...r, ...patch, version: r.version + 1 }); },
+  /** 다른 곳에서 남긴 가상 기록을 더한다 (경험 시점 지정) */
+  addRecord(uid, suffix, burden, occurredAt) {
+    const id = `00000000-0000-4000-9000-${suffix}`;
+    rows.set(id, {
+      id, owner_id: uid, occurred_at: occurredAt, occurred_tz: "Asia/Seoul",
+      recorded_at: occurredAt, recorded_tz: "Asia/Seoul", source: "direct",
+      burden, tags: [], note: null, created_at: now, updated_at: now, version: 1,
+    });
+    return id;
+  },
   mount(screen) {
+    // 홈은 자체 AuthScope(로그아웃해도 이동하지 않음)를 가진다.
+    if (screen === "home") { root.render(<React.Fragment key={++screenGeneration}><HomeCheckin /></React.Fragment>); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
@@ -96,13 +117,17 @@ function clientFor(uid) {
       return { data: response, error: null };
     },
     from(table) {
+      let byId = null;
       const query = {
-        select() { return query; }, eq() { return query; }, is() { return query; }, order() { return query; },
+        select() { return query; }, is() { return query; }, order() { return query; },
+        eq(column, value) { if (table === "checkins" && column === "id") byId = value; return query; },
         async limit() {
-          calls.push({ operation: table, uid });
-          const data = table === "consents" ? (consents.get(uid) !== false ? [{ id: "fake-consent" }] : []) : [...rows.values()].filter((r) => r.owner_id === uid).map((r) => ({ ...r }));
-          await waitGate(table);
+          const operation = byId ? "checkins_by_id" : table;
+          calls.push({ operation, uid, id: byId ?? undefined });
+          const data = table === "consents" ? (consents.get(uid) !== false ? [{ id: "fake-consent" }] : []) : [...rows.values()].filter((r) => r.owner_id === uid && (!byId || r.id === byId)).map((r) => ({ ...r }));
+          await waitGate(operation);
           if (table === "consents" && fixture.failure === "consent_query_error") return { data: null, error: { message: "fake consent query failure" } };
+          if (operation === "checkins" && fixture.failure === "list_error") { fixture.failure = null; return { data: null, error: { message: "fake list failure" } }; }
           return { data, error: null };
         },
         async insert() {
@@ -138,8 +163,10 @@ export function pinnedClient(jwt) {
 }
 function Probe() {
   const run = useScopedRequest();
+  const { uid } = useAuthScope();
   if (!fixture.staleRun) fixture.staleRun = run;
-  return null;
+  // 시험이 '지금 화면이 누구 것인지' 기다릴 수 있게 하는 표시 (시험 전용)
+  return <span hidden data-scope-uid={uid} />;
 }
 const root = createRoot(document.getElementById("root"));
 window.__fixture = fixture;
