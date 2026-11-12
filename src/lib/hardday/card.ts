@@ -120,13 +120,17 @@ export interface KeyValueStore {
   removeItem(key: string): void;
 }
 
+/** 저장소를 한 번만 읽어, 그 같은 값으로 카드와 비교 기준(raw)을 함께 정한다. */
+export type Snapshot = { result: LoadResult; raw: string | null };
+
+export function snapshot(store: KeyValueStore | null): Snapshot {
+  const raw = readRaw(store);
+  if (raw === undefined) return { result: { status: "unavailable" }, raw: null };
+  return { result: parseStored(raw), raw };
+}
+
 export function loadCard(store: KeyValueStore | null): LoadResult {
-  if (!store) return { status: "unavailable" };
-  try {
-    return parseStored(store.getItem(STORAGE_KEY));
-  } catch {
-    return { status: "unavailable" };
-  }
+  return snapshot(store).result;
 }
 
 /** 지금 저장소에 있는 원본 문자열. 읽을 수 없으면 undefined */
@@ -141,26 +145,24 @@ export function readRaw(store: KeyValueStore | null): string | null | undefined 
 
 export type SaveResult =
   | { status: "saved"; raw: string }
-  /** 이 화면이 읽은 뒤 다른 창(탭)에서 카드가 지워지거나 바뀜. 덮어쓰지 않았다. */
-  | { status: "conflict" }
+  /**
+   * 기준(expectedRaw) 이후 다른 창(탭)에서 카드가 지워지거나 바뀜. 덮어쓰지 않았다.
+   * currentRaw: 지금 저장소 값 (null이면 지워짐). 사용자가 확인하면 이 값을 기준으로 다시 저장한다.
+   */
+  | { status: "conflict"; currentRaw: string | null }
   /** 저장소를 못 쓰거나 용량 초과 등. 저장되지 않았다. */
   | { status: "failed" };
 
 /**
  * 저장하고, 다시 읽어 같은지 확인한다. 확인될 때만 성공.
- * expectedRaw: 이 화면이 마지막으로 본 원본 (없었으면 null). 지금 저장소 값이 이것과 다르면 저장하지 않는다
- * (다른 창에서 지운 카드를 되살리거나, 다른 창에서 고친 카드를 덮어쓰지 않도록). force면 확인 없이 저장.
+ * expectedRaw: 사용자가 보고(또는 덮어써도 된다고 확인하고) 있는 카드의 원본 (없었으면 null).
+ * 지금 저장소 값이 이것과 다르면 저장하지 않는다 — '덮어쓰기 확인'도 그 확인을 받은 버전에만 적용된다.
  */
-export function saveCard(
-  store: KeyValueStore | null,
-  card: HardDayCard,
-  expectedRaw: string | null,
-  force = false,
-): SaveResult {
+export function saveCard(store: KeyValueStore | null, card: HardDayCard, expectedRaw: string | null): SaveResult {
   if (!store) return { status: "failed" };
   const current = readRaw(store);
   if (current === undefined) return { status: "failed" };
-  if (!force && current !== expectedRaw) return { status: "conflict" };
+  if (current !== expectedRaw) return { status: "conflict", currentRaw: current };
   try {
     const text = JSON.stringify(card);
     store.setItem(STORAGE_KEY, text);
@@ -170,15 +172,34 @@ export function saveCard(
   }
 }
 
-/** 이 기기에서 지우고, 지워졌는지 확인한다. */
-export function clearCard(store: KeyValueStore | null): boolean {
-  if (!store) return false;
+export type ClearResult = { status: "cleared" } | { status: "conflict"; currentRaw: string | null } | { status: "failed" };
+
+/**
+ * 이 기기에서 지우고, 지워졌는지 확인한다.
+ * expectedRaw: 사용자가 '지울까요?'를 확인한 카드의 원본. 그사이 다른 창에서 바뀌었으면 지우지 않는다
+ * (새로 저장된 카드를 확인 없이 지우지 않도록). 이미 지워져 있으면 그대로 '지움'.
+ */
+export function clearCard(store: KeyValueStore | null, expectedRaw: string | null): ClearResult {
+  if (!store) return { status: "failed" };
+  const current = readRaw(store);
+  if (current === undefined) return { status: "failed" };
+  if (current === null) return { status: "cleared" };
+  if (current !== expectedRaw) return { status: "conflict", currentRaw: current };
   try {
     store.removeItem(STORAGE_KEY);
-    return store.getItem(STORAGE_KEY) === null;
+    return store.getItem(STORAGE_KEY) === null ? { status: "cleared" } : { status: "failed" };
   } catch {
-    return false;
+    return { status: "failed" };
   }
+}
+
+/** 두 카드의 내용이 같은지 (저장 시각 제외) */
+export function sameContent(
+  a: Pick<HardDayCard, "foods" | "people" | "message">,
+  b: Pick<HardDayCard, "foods" | "people" | "message">,
+): boolean {
+  const key = (c: Pick<HardDayCard, "foods" | "people" | "message">) => JSON.stringify([c.foods, c.people, c.message]);
+  return key(a) === key(b);
 }
 
 /**

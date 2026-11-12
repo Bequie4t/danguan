@@ -16,6 +16,8 @@ import {
   parseStored,
   safeUrl,
   saveCard,
+  sameContent,
+  snapshot,
   urlProblem,
   type KeyValueStore,
 } from "../src/lib/hardday/card";
@@ -90,29 +92,56 @@ test("저장 → 다시 읽기 → 지우기, 저장은 다시 읽어 같을 때
     assert.equal(loaded.raw, r.raw);
   }
   assert.deepEqual([...s.data.keys()], [STORAGE_KEY], "정해진 키 하나만 씀");
-  assert.equal(clearCard(s), true);
+  assert.deepEqual(clearCard(s, r.status === "saved" ? r.raw : null), { status: "cleared" });
   assert.deepEqual(loadCard(s), { status: "empty" });
 });
 
-test("다른 창에서 지우거나 바꾼 카드는 저장 직전에 알아채고 덮어쓰지 않는다 (확인하면 저장)", () => {
+test("저장·덮어쓰기는 확인한 버전에만: 다른 창에서 지우거나 바꾸면 멈추고, 경고 뒤 또 바뀌면 다시 멈춘다", () => {
   const s = new MemoryStore();
-  const a = normalize({ foods: [], people: ["민지"], message: "가상 A" }, NOW);
-  const first = saveCard(s, a, null);
+  const first = saveCard(s, normalize({ foods: [], people: ["민지"], message: "가상 A" }, NOW), null);
   assert.equal(first.status, "saved");
   const base = first.status === "saved" ? first.raw : null;
-  // 다른 창에서 지움 → 이 창의 저장은 충돌, 지운 카드가 되살아나지 않음
-  s.removeItem(STORAGE_KEY);
   const edited = normalize({ foods: [], people: ["민지"], message: "가상 A 고침" }, NOW);
-  assert.deepEqual(saveCard(s, edited, base), { status: "conflict" });
+  // 다른 창에서 지움 → 충돌(지금 값 null), 지운 카드가 되살아나지 않음
+  s.removeItem(STORAGE_KEY);
+  assert.deepEqual(saveCard(s, edited, base), { status: "conflict", currentRaw: null });
   assert.equal(s.getItem(STORAGE_KEY), null, "지운 카드가 되살아남");
-  // 다른 창에서 바꿈 → 충돌, 다른 창 내용 유지
+  // 사용자가 '지워진 상태'를 보고 그래도 새로 저장하기로 함 → 그 사이 다른 창이 또 저장했다면 다시 멈춤
   const other = saveCard(s, normalize({ foods: [], people: [], message: "가상 다른 창" }, NOW), null);
   assert.equal(other.status, "saved");
-  assert.deepEqual(saveCard(s, edited, base), { status: "conflict" });
+  const again = saveCard(s, edited, null); // 경고 때 본 버전(null) 기준
+  assert.equal(again.status, "conflict", "경고 뒤 또 바뀐 카드를 덮어씀");
   assert.match(s.getItem(STORAGE_KEY)!, /가상 다른 창/);
-  // 사용자가 확인하고 저장(force)하면 저장
-  assert.equal(saveCard(s, edited, base, true).status, "saved");
+  // 새 경고(지금 버전)를 보고 확인하면 그때 저장
+  const okNow = saveCard(s, edited, again.status === "conflict" ? again.currentRaw : null);
+  assert.equal(okNow.status, "saved");
   assert.match(s.getItem(STORAGE_KEY)!, /가상 A 고침/);
+});
+
+test("지우기도 확인한 버전에만: 확인 뒤 다른 창에서 새로 저장된 카드는 지우지 않는다", () => {
+  const s = new MemoryStore();
+  const a = saveCard(s, normalize({ foods: [], people: [], message: "가상 옛 카드" }, NOW), null);
+  const confirmed = a.status === "saved" ? a.raw : null;
+  const b = saveCard(s, normalize({ foods: [], people: [], message: "가상 새 카드" }, NOW), confirmed); // 다른 창 저장
+  assert.equal(b.status, "saved");
+  const r = clearCard(s, confirmed);
+  assert.equal(r.status, "conflict", "새 카드를 확인 없이 지움");
+  assert.match(s.getItem(STORAGE_KEY)!, /가상 새 카드/);
+  assert.deepEqual(clearCard(s, r.status === "conflict" ? r.currentRaw : null), { status: "cleared" }, "새 카드를 보고 다시 확인하면 지움");
+  assert.deepEqual(clearCard(s, "아무 값"), { status: "cleared" }, "이미 없으면 지운 것으로");
+});
+
+test("한 번 읽은 값으로 카드와 비교 기준을 함께 정한다 (두 번 읽는 사이 삭제돼도 어긋나지 않음)", () => {
+  const s = new MemoryStore();
+  const w = saveCard(s, normalize({ foods: [], people: [], message: "가상" }, NOW), null);
+  const snap = snapshot(s);
+  assert.equal(snap.result.status, "ok");
+  assert.equal(snap.raw, w.status === "saved" ? w.raw : undefined);
+  // 읽은 뒤 다른 창이 지워도, 이 화면의 기준은 읽은 카드 → 평범한 저장은 충돌로 멈춤
+  s.removeItem(STORAGE_KEY);
+  assert.equal(saveCard(s, normalize({ foods: [], people: [], message: "가상 고침" }, NOW), snap.raw).status, "conflict");
+  assert.deepEqual(snapshot(null), { result: { status: "unavailable" }, raw: null });
+  assert.equal(sameContent(normalize({ foods: [], people: ["가"], message: "x" }, NOW), normalize({ foods: [], people: ["가"], message: "x" }, new Date(0))), true);
 });
 
 test("저장소를 쓸 수 없거나, 용량 초과로 쓰기가 실패하면 성공으로 표시하지 않는다. 읽기만 되면 기존 카드는 보인다", () => {
@@ -122,7 +151,7 @@ test("저장소를 쓸 수 없거나, 용량 초과로 쓰기가 실패하면 �
   const throwing: KeyValueStore = { getItem: () => { throw new Error("x"); }, setItem: () => { throw new Error("x"); }, removeItem: () => { throw new Error("x"); } };
   assert.deepEqual(loadCard(throwing), { status: "unavailable" });
   assert.deepEqual(saveCard(throwing, card, null), { status: "failed" });
-  assert.equal(clearCard(throwing), false);
+  assert.deepEqual(clearCard(throwing, null), { status: "failed" });
   // 읽기는 되고 쓰기만 용량 초과
   const mem = new MemoryStore();
   const kept = saveCard(mem, card, null);
@@ -138,7 +167,7 @@ test("저장소를 쓸 수 없거나, 용량 초과로 쓰기가 실패하면 �
   const silent: KeyValueStore = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
   assert.deepEqual(saveCard(silent, card, null), { status: "failed" }, "써도 남지 않으면 실패");
   const sticky: KeyValueStore = { getItem: () => "x", setItem: () => {}, removeItem: () => {} };
-  assert.equal(clearCard(sticky), false, "지워지지 않으면 실패");
+  assert.deepEqual(clearCard(sticky, "x"), { status: "failed" }, "지워지지 않으면 실패");
 });
 
 test("한글이 든 주문 주소는 자르지 않고 통째로 보존하고, 너무 길면 자르지 않고 저장 전에 알린다", () => {
@@ -183,6 +212,8 @@ test("화면: 로그·네트워크·쿠키 없음, 이 기기 저장소만, 앱�
   const visible = code.replace(/\{\/\*[\s\S]*?\*\/\}/g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.ok(!/진단|치료|완치|처방|연속|출석|배지|스트릭|매일/.test(visible), "금지 표현");
   assert.ok(/target="_blank"\s+rel="noopener noreferrer"/.test(code), "주문 주소는 새 창 + noopener");
+  // 화면과 비교 기준은 한 번 읽은 값으로 함께 정한다 (따로 두 번 읽으면 사이에 삭제될 때 어긋남)
+  assert.ok(!/loadCard\(/.test(code), "화면이 저장소를 따로 두 번 읽음");
 });
 
 test("힘든 날 카드는 로그인·기록 저장·Supabase 코드를 가져오지 않고, 미들웨어를 거치지 않는다", () => {

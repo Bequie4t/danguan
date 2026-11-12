@@ -15,15 +15,18 @@ import {
   clearCard,
   emptyCard,
   hasContent,
-  loadCard,
   normalize,
+  parseStored,
   readRaw,
+  sameContent,
+  snapshot,
   saveCard,
   STORAGE_KEY,
   urlProblem,
   type Food,
   type HardDayCard as Card,
   type KeyValueStore,
+  type Snapshot,
 } from "@/lib/hardday/card";
 
 const focusRing = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
@@ -35,12 +38,15 @@ type Notice =
   | null
   | "saved"
   | "save-failed"
-  | "conflict"
+  | "conflict-removed"
+  | "conflict-changed"
   | "cleared"
+  | "clear-conflict"
   | "clear-failed"
   | "broken"
   | "unavailable"
   | "removed-elsewhere"
+  | "removed-elsewhere-kept"
   | "changed-elsewhere"
   | "changed-while-editing";
 
@@ -64,93 +70,116 @@ function formatSaved(iso: string): string {
 
 export default function HardDayCard() {
   const store = useRef<KeyValueStore | null>(null);
-  /** 이 화면이 마지막으로 본(또는 저장한) 원본. 저장 직전에 지금 값과 비교해 다른 창의 삭제·변경을 알아챈다. */
+  /**
+   * 이 화면이 보고 있는 저장 카드의 원본 (없으면 null). 저장소를 한 번 읽은 같은 값으로 화면과 함께 정한다.
+   * 저장·지우기 직전에 지금 값과 비교해, 그사이 다른 창(탭)의 삭제·변경을 덮어쓰지 않는다.
+   */
   const baseRaw = useRef<string | null>(null);
+  /** 이 화면이 아는 저장 카드 (임시 카드와 따로 둔다) */
+  const stored = useRef<Card | null>(null);
   const [available, setAvailable] = useState(true);
   const [phase, setPhase] = useState<Phase>("loading");
+  /** 보기 화면에 보이는 카드: 저장 카드 또는 '이번에만 보기' 카드 */
   const [saved, setSaved] = useState<Card | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [notice, setNotice] = useState<Notice>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
+  /** 지우기 확인을 연 카드의 원본. 지우기는 이 버전에만 적용된다. null이면 확인을 열지 않음 */
+  const [confirmRaw, setConfirmRaw] = useState<string | null>(null);
+  /** 저장이 충돌로 멈췄을 때, 그 순간 저장소 값. '그래도 저장'은 이 버전을 덮어쓰는 데에만 동의한 것 */
+  const [conflict, setConflict] = useState<{ currentRaw: string | null } | null>(null);
   /** '저장하지 않고 이번에만 보기'로 연 카드 (저장소에 없음) */
   const [temporary, setTemporary] = useState(false);
   const [copied, setCopied] = useState<{ result: "copied" | "failed"; text: string } | null>(null);
   const msgRef = useRef<HTMLTextAreaElement>(null);
-  const phaseRef = useRef<Phase>("loading");
-  const temporaryRef = useRef(false);
+  const live = useRef({ phase: "loading" as Phase, temporary: false, draft: emptyDraft() });
   const uid = useId();
-  phaseRef.current = phase;
-  temporaryRef.current = temporary;
+  live.current = { phase, temporary, draft };
+  const confirmClear = confirmRaw !== null;
+
+  /** 저장소를 한 번 읽은 값으로 화면을 맞춘다 (처음 열 때·다시 불러올 때) */
+  function applySnapshot(snap: Snapshot, fallbackNotice: Notice = null) {
+    baseRaw.current = snap.raw;
+    setConflict(null);
+    setConfirmRaw(null);
+    setTemporary(false);
+    setCopied(null);
+    const r = snap.result;
+    if (r.status === "ok") {
+      stored.current = r.card;
+      setSaved(r.card);
+      setDraft(fromCard(r.card));
+      setNotice(fallbackNotice);
+      setPhase("view");
+      return;
+    }
+    stored.current = null;
+    setSaved(null);
+    setDraft(emptyDraft());
+    if (r.status === "unavailable") {
+      setAvailable(false);
+      setNotice("unavailable");
+    } else setNotice(r.status === "broken" ? "broken" : fallbackNotice);
+    setPhase("edit");
+  }
 
   // 처음 열 때 이 기기에 저장된 카드를 읽는다 (서버 렌더링 때는 읽지 않음). 읽기·저장·지우기는 따로 다룬다.
   useEffect(() => {
     store.current = browserStore();
-    const r = loadCard(store.current);
-    const raw = readRaw(store.current);
-    baseRaw.current = raw === undefined ? null : raw;
-    if (r.status === "ok") {
-      setSaved(r.card);
-      setDraft(fromCard(r.card));
-      setPhase("view");
-    } else {
-      if (r.status === "unavailable") {
-        setAvailable(false);
-        setNotice("unavailable");
-      }
-      if (r.status === "broken") setNotice("broken");
-      setPhase("edit");
-    }
+    applySnapshot(snapshot(store.current));
 
-    // 다른 창(탭)에서 지우거나 바꾸면 바로 반영한다. 지운 카드가 이 화면에 남아 되살아나지 않게.
+    // 다른 창(탭)에서 지우거나 바꾸면 바로 반영한다. 지운 저장 카드는 되살리지 않고, 따로 적던 내용은 지킨다.
     const onStorage = (e: StorageEvent) => {
       if (e.key !== STORAGE_KEY && e.key !== null) return;
-      const now = readRaw(store.current);
+      const now = readRaw(store.current); // 한 번만 읽은 값으로 판단
       if (now === undefined || now === baseRaw.current) return;
-      const next = loadCard(store.current);
-      if (next.status === "empty") {
-        baseRaw.current = null;
-        setSaved(null);
-        setTemporary(false);
-        setDraft(emptyDraft());
-        setCopied(null);
-        setConfirmClear(false);
-        setPhase("edit");
-        setNotice("removed-elsewhere");
+      setConfirmRaw(null); // 확인하던 카드가 바뀌었으니 지우기 확인은 닫는다
+      const { phase: ph, temporary: temp, draft: d } = live.current;
+      const viewingStored = ph === "view" && !temp;
+      const next = parseStored(now);
+      if (viewingStored) {
+        // 저장 카드를 보는 중: 새 상태로 바꾼다 (지워졌으면 비움)
+        applySnapshot({ result: next, raw: now }, now === null ? "removed-elsewhere" : next.status === "ok" ? "changed-elsewhere" : null);
         return;
       }
-      if (next.status === "ok" && phaseRef.current === "view" && !temporaryRef.current) {
-        baseRaw.current = next.raw;
-        setSaved(next.card);
-        setDraft(fromCard(next.card));
-        setCopied(null);
-        setNotice("changed-elsewhere");
+      if (now === null && ph === "edit" && stored.current && sameContent(normalize(d, new Date()), stored.current)) {
+        // 지워진 카드를 고치지 않고 열어 둔 상태: 지운 내용이 남지 않게 비운다
+        applySnapshot({ result: { status: "empty" }, raw: null }, "removed-elsewhere");
         return;
       }
-      // 적는 중이면 적던 내용은 두고 알리기만 한다 (저장할 때 다시 확인)
-      setNotice("changed-while-editing");
+      // 따로 적던 내용·'이번에만 보기' 카드는 지킨다. 비교 기준은 그대로 두어, 저장하려면 다시 확인받는다.
+      if (now === null) stored.current = null;
+      setNotice(now === null ? "removed-elsewhere-kept" : "changed-while-editing");
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const problems = draft.foods.map((f) => urlProblem(f.url));
   const valid = hasContent(draft) && problems.every((p) => p === null);
   const canSave = available && valid;
 
-  function save(force = false) {
+  /** overwrite: 충돌 경고를 본 뒤 '그래도 저장' — 경고를 띄운 그 버전에만 적용된다 */
+  function save(overwrite = false) {
     if (!canSave) return;
     const card = normalize(draft, new Date());
-    const r = saveCard(store.current, card, baseRaw.current, force);
+    const expected = overwrite && conflict ? conflict.currentRaw : baseRaw.current;
+    const r = saveCard(store.current, card, expected);
     if (r.status === "saved") {
       baseRaw.current = r.raw;
+      stored.current = card;
+      setConflict(null);
       setSaved(card);
       setTemporary(false);
       setDraft(fromCard(card));
       setNotice("saved");
       setCopied(null);
       setPhase("view");
+    } else if (r.status === "conflict") {
+      setConflict({ currentRaw: r.currentRaw }); // 또 바뀌었으면 새 버전으로 다시 묻는다
+      setNotice(r.currentRaw === null ? "conflict-removed" : "conflict-changed");
     } else {
-      setNotice(r.status === "conflict" ? "conflict" : "save-failed"); // 입력은 그대로 둔다
+      setNotice("save-failed"); // 입력은 그대로 둔다
     }
   }
 
@@ -158,42 +187,28 @@ export default function HardDayCard() {
     if (!valid) return;
     setSaved(normalize(draft, new Date()));
     setTemporary(true);
+    setConflict(null);
     setCopied(null);
     setNotice(null);
     setPhase("view");
   }
 
   function reloadStored() {
-    const r = loadCard(store.current);
-    const raw = readRaw(store.current);
-    baseRaw.current = raw === undefined ? null : raw;
-    setTemporary(false);
-    setCopied(null);
-    if (r.status === "ok") {
-      setSaved(r.card);
-      setDraft(fromCard(r.card));
-      setNotice(null);
-      setPhase("view");
-    } else {
-      setSaved(null);
-      setDraft(emptyDraft());
-      setNotice(r.status === "broken" ? "broken" : null);
-      setPhase("edit");
-    }
+    applySnapshot(snapshot(store.current));
   }
 
   function clear() {
-    if (clearCard(store.current)) {
-      baseRaw.current = null;
-      setSaved(null);
-      setDraft(emptyDraft());
-      setNotice("cleared");
-      setCopied(null);
-      setPhase("edit");
+    if (confirmRaw === null) return;
+    const r = clearCard(store.current, confirmRaw);
+    if (r.status === "cleared") {
+      applySnapshot({ result: { status: "empty" }, raw: null }, "cleared");
+    } else if (r.status === "conflict") {
+      // 확인한 뒤 다른 창에서 바뀐 카드: 지우지 않고 바뀐 카드를 보여 준 뒤 다시 묻는다
+      applySnapshot({ result: parseStored(r.currentRaw), raw: r.currentRaw }, "clear-conflict");
     } else {
+      setConfirmRaw(null);
       setNotice("clear-failed");
     }
-    setConfirmClear(false);
   }
 
   async function copy(text: string) {
@@ -225,12 +240,15 @@ export default function HardDayCard() {
   const noticeText: Record<Exclude<Notice, null>, string> = {
     saved: "이 기기에 저장했어요.",
     "save-failed": "저장하지 못했어요 (저장 공간 부족 등). 적은 내용은 그대로 있어요. 아래 ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
-    conflict: "다른 창에서 이 카드를 지우거나 바꿨어요. 그래서 저장하지 않았어요. 적은 내용은 그대로 있어요.",
+    "conflict-removed": "다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요. 적은 내용은 그대로 있어요.",
+    "conflict-changed": "다른 창에서 저장된 카드를 바꿨어요. 그래서 저장하지 않았어요. 적은 내용은 그대로 있어요.",
     cleared: "이 기기에서 카드를 지웠어요.",
+    "clear-conflict": "다른 창에서 카드가 바뀌어서 지우지 않았어요. 바뀐 카드를 확인하고, 지우려면 다시 눌러 주세요.",
     "clear-failed": "지우지 못했어요. 브라우저 설정에서 이 사이트 데이터를 지울 수도 있어요.",
     broken: "저장된 카드를 읽을 수 없어서 쓰지 않았어요. 새로 적어 저장하면 바뀌어요.",
     unavailable: "이 브라우저에서는 저장할 수 없어요 (사생활 보호 모드 등). ‘저장하지 않고 이번에만 보기’로 쓸 수 있어요.",
     "removed-elsewhere": "다른 창에서 이 카드를 지웠어요. 이 화면에서도 지웠어요.",
+    "removed-elsewhere-kept": "다른 창에서 저장된 카드를 지웠어요. 이 화면에 따로 적은 내용은 그대로 있어요. 저장하려면 한 번 더 확인해요.",
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
   };
@@ -376,13 +394,13 @@ export default function HardDayCard() {
               <strong>이 카드는 이 브라우저에 저장돼요.</strong> 로그아웃해도 남고, 같은 브라우저를 쓰는 사람은 로그인 없이 볼 수
               있어요. 함께 쓰는 기기라면 ‘저장하지 않고 이번에만 보기’를 골라 주세요. 서버나 계정에는 올리지 않아요.
             </p>
-            {notice === "conflict" ? (
+            {conflict ? (
               <div role="group" aria-label="다른 창의 변경" className="space-y-2">
                 <button type="button" onClick={() => save(true)} disabled={!canSave} className={`pastel-fill ${bigButton} disabled:opacity-50`}>
-                  그래도 지금 적은 내용으로 저장하기
+                  {conflict.currentRaw === null ? "그래도 지금 적은 내용으로 새로 저장하기" : "그래도 지금 적은 내용으로 바꾸기"}
                 </button>
                 <button type="button" onClick={reloadStored} className={`min-h-11 w-full rounded-full border border-fg px-4 font-semibold ${focusRing}`}>
-                  저장된 카드 다시 불러오기 (적은 내용은 사라져요)
+                  {conflict.currentRaw === null ? "적은 내용 버리고 처음부터" : "다른 창에서 바꾼 카드 불러오기 (적은 내용은 사라져요)"}
                 </button>
               </div>
             ) : (
@@ -409,6 +427,7 @@ export default function HardDayCard() {
                 type="button"
                 onClick={() => {
                   setDraft(fromCard(saved));
+                  setConflict(null);
                   setNotice(null);
                   setPhase("view");
                 }}
@@ -549,7 +568,7 @@ export default function HardDayCard() {
         {temporary ? null : !confirmClear ? (
           <button
             type="button"
-            onClick={() => setConfirmClear(true)}
+            onClick={() => setConfirmRaw(baseRaw.current)}
             className={`min-h-11 rounded-full border border-line px-4 text-sm ${focusRing}`}
           >
             이 기기에서 지우기
@@ -565,7 +584,7 @@ export default function HardDayCard() {
               </button>
               <button
                 type="button"
-                onClick={() => setConfirmClear(false)}
+                onClick={() => setConfirmRaw(null)}
                 className={`min-h-11 rounded-full border border-line px-5 ${focusRing}`}
               >
                 취소
