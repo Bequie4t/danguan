@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { CONTACTS, HELP_CHECKED_ON, LOCAL_CENTER, type HelpSource } from "./contacts";
 
-export const metadata: Metadata = { title: "도움 받기 · 당우안" };
+export const metadata: Metadata = { title: "도움 받기 · 404 blue" };
 export const dynamic = "force-static";
 
 function formatKoreanDate(iso: string): string {
