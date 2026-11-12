@@ -7,6 +7,7 @@ import CheckinForm from "../../src/components/CheckinForm";
 import RecordList from "../../src/components/RecordList";
 import ConsentForm from "../../src/components/ConsentForm";
 import HomeCheckin from "../../src/components/HomeCheckin";
+import HelpPage from "../../src/app/help/page";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -69,6 +70,8 @@ export const fixture = {
   mount(screen) {
     // 홈은 자체 AuthScope(로그아웃해도 이동하지 않음)를 가진다.
     if (screen === "home") { root.render(<React.Fragment key={++screenGeneration}><HomeCheckin /></React.Fragment>); return; }
+    // 도움 화면은 로그인·저장과 무관: AuthScope 없이 그대로 렌더한다.
+    if (screen === "help") { root.render(<React.Fragment key={++screenGeneration}><HelpPage /></React.Fragment>); return; }
     root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {

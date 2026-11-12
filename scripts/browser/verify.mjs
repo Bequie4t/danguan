@@ -510,6 +510,76 @@ try {
       await page.evaluate(() => window.__fixture.setConsent(window.__fixture.A, true));
     });
 
+    // 도움 화면: 색 대비 계산 (CSS 색을 캔버스로 sRGB로 바꿔 WCAG 대비를 구함)
+    const helpContrast = () => page.evaluate(() => {
+      const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+      const cx = cv.getContext("2d", { willReadFrequently: true });
+      const rgba = (c) => { cx.clearRect(0, 0, 1, 1); cx.fillStyle = "#000"; cx.fillStyle = c; cx.fillRect(0, 0, 1, 1); const d = cx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+      const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 0.99) return c; } return rgba(getComputedStyle(document.body).backgroundColor); };
+      const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (el) => { const bg = bgOf(el); let fg = rgba(getComputedStyle(el).color); fg = [0, 1, 2].map((i) => fg[i] * fg[3] + bg[i] * (1 - fg[3])); const a = lum(fg), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+      const out = [];
+      for (const card of document.querySelectorAll("[data-help-number]")) for (const span of card.querySelectorAll("span")) if (span.children.length === 0 && span.textContent.trim()) out.push({ text: span.textContent.trim().slice(0, 12), ratio: Math.round(ratio(span) * 100) / 100 });
+      for (const el of document.querySelectorAll("main p, main h1, main h2, main a[download], main li")) if (el.textContent.trim()) out.push({ text: el.textContent.trim().slice(0, 12), ratio: Math.round(ratio(el) * 100) / 100 });
+      return out;
+    });
+
+    await scenario("도움 화면: 109가 맨 위·가장 크게, 모든 번호가 전화 링크, 저장·출처·확인 날짜 유지", async () => {
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const cards = await page.locator("[data-help-number]").evaluateAll((els) => els.map((a) => {
+        const nums = [...a.querySelectorAll("span")].filter((s) => /^[0-9-]+$/.test(s.textContent.trim()));
+        const r = a.getBoundingClientRect();
+        return { number: a.dataset.helpNumber, href: a.getAttribute("href"), label: a.getAttribute("aria-label"), size: parseFloat(getComputedStyle(nums[0]).fontSize), top: r.top, h: r.height, w: r.width };
+      }));
+      assert.deepEqual(cards.map((c) => c.number), ["109", "1577-0199", "119", "112"]);
+      assert.deepEqual(cards.map((c) => c.href), ["tel:109", "tel:15770199", "tel:119", "tel:112"]);
+      for (const c of cards) { assert.ok(c.h >= 44 && c.w >= 44, `${c.number} 누르는 영역이 작음`); assert.ok(c.label.includes(c.number) && c.label.includes("전화 걸기")); }
+      assert.ok(cards[0].size > Math.max(...cards.slice(1).map((c) => c.size)), "109가 가장 크지 않음");
+      assert.ok(cards[0].top < cards[1].top, "109가 맨 위가 아님");
+      assert.equal(await page.locator('a[href="/help/contact-card"][download]').count(), 1, "연락처 저장 링크");
+      const text = await page.locator("#root").innerText();
+      assert.ok(text.includes("2026년 10월 8일에 공식 기관 누리집을 기준으로 확인"), "확인 날짜");
+      assert.ok(text.includes("안전을 보장하지 않아요"));
+      assert.ok((await page.locator('a[target="_blank"][rel~="noopener"]').count()) >= 6, "출처 링크");
+      assert.equal(await page.locator('svg[role="img"]').count(), 0, "도움 화면에 울이·그림 없음");
+      const low = (await helpContrast()).filter((x) => x.ratio < 4.5);
+      assert.deepEqual(low, [], "밝은 화면 글씨 대비 4.5:1 미만");
+    });
+
+    await scenario("도움 화면: 어두운 화면에서도 글씨 대비 4.5:1 이상", async () => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const low = (await helpContrast()).filter((x) => x.ratio < 4.5);
+      await page.emulateMedia({ colorScheme: "light" });
+      assert.deepEqual(low, [], "어두운 화면 글씨 대비 4.5:1 미만");
+    });
+
+    await scenario("도움 화면: 200% 확대(폭 절반)에서도 가로로 넘치지 않고 번호가 다 보임", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const r = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        cut: [...document.querySelectorAll("[data-help-number]")].filter((a) => a.scrollWidth > a.clientWidth + 1).map((a) => a.dataset.helpNumber),
+      }));
+      await page.setViewportSize(vp);
+      assert.ok(r.overflow <= 0, `가로로 ${r.overflow}px 넘침`);
+      assert.deepEqual(r.cut, [], "카드 안에서 잘린 번호");
+    });
+
+    await scenario("도움 화면: 키보드 Tab으로 109부터 차례로 이동", async () => {
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const order = [];
+      for (let i = 0; i < 4; i++) { await page.keyboard.press("Tab"); order.push(await page.evaluate(() => document.activeElement?.getAttribute("data-help-number"))); }
+      assert.deepEqual(order, ["109", "1577-0199", "119", "112"]);
+      const ring = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+      assert.notEqual(ring, "none", "키보드 초점 표시 없음");
+    });
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
