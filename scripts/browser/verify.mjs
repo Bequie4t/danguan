@@ -395,6 +395,32 @@ try {
       assert.equal(snap.rows.length, 3, "가상 A·B 기존 기록 2개 + 이 기록 1개 (두 건이 생기지 않음)");
     });
 
+    await scenario("홈: 다시 확인 중 세션 확인이 실패해도 조회 버튼만 유지, 새로 만들지 않음", async () => {
+      await fresh("home");
+      await page.evaluate(() => { window.__fixture.failure = "lost_response"; });
+      await page.getByRole("button", { name: "버거워요", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
+      const snap0 = await page.evaluate(() => window.__fixture.snapshot());
+      const id = snap0.calls.find((c) => c.operation === "create_checkin").id;
+      const row = snap0.rows.find((r) => r.id === id);
+      await page.evaluate((id) => window.__fixture.removeElsewhere(id), id); // 아직 도착하지 않은 것처럼
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
+      await page.getByText("아직 이 기록을 찾지 못했어요.", { exact: false }).waitFor();
+      await page.evaluate(() => { window.__fixture.failure = "session_error"; });
+      await page.getByRole("button", { name: "다시 확인하기", exact: true }).click();
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "다시 남기기", exact: true }).count(), 0, "새로 만드는 버튼이 보이면 안 됨");
+      assert.equal(await page.getByRole("button", { name: "‘버거워요’ 새로 남기기", exact: true }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "괜찮은 편이에요", exact: true }).isDisabled(), true, "결과를 모르는 동안 다른 값 잠김");
+      await page.evaluate((row) => { window.__fixture.failure = null; window.__fixture.putRow(row); }, row); // 늦게 저장됨
+      await page.getByRole("button", { name: "저장됐는지 확인하기", exact: true }).click();
+      await homeSaved().waitFor();
+      const snap = await page.evaluate(() => window.__fixture.snapshot());
+      assert.equal(snap.calls.filter((c) => c.operation === "create_checkin").length, 1, "생성 요청은 처음 1번뿐");
+      assert.equal(snap.rows.filter((r) => r.id === id).length, 1);
+      assert.equal(snap.rows.length, 3, "기존 2개 + 이 기록 1개");
+    });
+
     await scenario("홈 되돌리기 뒤 울이 조회가 실패해도 지운 기록 모습에 머물지 않음", async () => {
       await fresh("home");
       await page.waitForFunction(() => document.querySelector('svg[role="img"]')?.getAttribute("aria-label")?.includes("무겁게"));

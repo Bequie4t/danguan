@@ -213,6 +213,10 @@ function QuickCheckin() {
     const r = await run((client) => confirmSaved(client as unknown as RecordsClient, prev));
     if (!("ticket" in r) || !guard.isCurrent(r.ticket)) return;
     if (!r.ok) {
+      // 세션 확인 등에서 멈춰 조회하지 못했다. 저장 여부는 여전히 모른다.
+      // 같은 ID를 '결과를 모르는 요청'으로 붙잡아 두어, 다음에도 조회만 하게 한다(새로 만드는 버튼을 보이지 않음).
+      setPending(prev);
+      recheck.current = null;
       setFailReason("unknown");
       setStatus("failed");
       return;

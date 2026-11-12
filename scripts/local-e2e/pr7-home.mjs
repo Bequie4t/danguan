@@ -1,25 +1,35 @@
-// PR #7 실제 로그인·실제 DB 시험 (로컬 임시 Supabase + next start). 가상 계정·가상 데이터만.
-// 운영·테스트 Supabase 프로젝트에는 연결하지 않는다.
-import { execSync } from "node:child_process";
+// PR #7 홈 기록: 실제 로그인·실제 DB 구조 시험 (로컬 임시 Supabase + 로컬 빌드). 가상 계정·가상 데이터만.
+// 직접 실행하지 말고 scripts/local-e2e/run.sh로 실행한다 (로컬 DB 주소로 새로 빌드하고 환경 변수를 넘겨 줌).
+// 안전장치: 브라우저 요청은 127.0.0.1/localhost만 허용하고 나머지는 막는다. 로컬 주소가 아니면 시작하지 않는다.
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-const require = createRequire("/tmp/claude-0/-home-claude/fdd603a3-282f-5530-b028-8c4df4045bf9/scratchpad/gh/package.json");
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const require = createRequire(import.meta.url);
 const { createClient } = require("@supabase/supabase-js");
-const { chromium } = await import("/opt/npm-tools/node_modules/playwright/index.mjs");
 
-const APP = "http://127.0.0.1:3000";
-const SB = "http://127.0.0.1:54321";
-const ANON = process.env.ANON;
-const SERVICE = process.env.SERVICE;
-const SHOTS = "/tmp/claude-0/-home-claude/fdd603a3-282f-5530-b028-8c4df4045bf9/scratchpad/e2e/shots";
+const need = (k) => { const v = process.env[k]; if (!v) { console.error(`환경 변수 ${k}가 없습니다. run.sh로 실행하세요.`); process.exit(2); } return v; };
+const APP = need("E2E_APP_URL");
+const SB = need("E2E_SUPABASE_URL");
+const ANON = need("E2E_ANON_KEY");
+const SERVICE = need("E2E_SERVICE_KEY");
+const DB_CONTAINER = need("E2E_DB_CONTAINER");
+const isLocal = (u) => ["127.0.0.1", "localhost"].includes(new URL(u).hostname);
+if (!isLocal(APP) || !isLocal(SB)) { console.error("로컬 주소가 아니어서 중단합니다."); process.exit(2); }
+const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
+  ? await import(pathToFileURL(process.env.TEST_PLAYWRIGHT_MODULE).href)
+  : await import("playwright");
+const SHOTS = process.env.E2E_SHOTS_DIR ?? join(tmpdir(), "danguan-local-e2e-shots");
 mkdirSync(SHOTS, { recursive: true });
 
 const tag = Date.now().toString(36);
 const A = { email: `local-a-${tag}@example.test`, password: randomBytes(12).toString("hex") };
 const B = { email: `local-b-${tag}@example.test`, password: randomBytes(12).toString("hex") };
 
-const sql = (q) => execSync(`docker exec supabase_db_localsb psql -U postgres -tA -F '|' -c "${q.replace(/"/g, '\\"')}"`).toString().trim();
+const sql = (q) => execFileSync("docker", ["exec", DB_CONTAINER, "psql", "-U", "postgres", "-tA", "-F", "|", "-c", q]).toString().trim();
 const results = [];
 let shot = 0;
 async function step(name, page, fn) {
@@ -37,6 +47,14 @@ const ok = (c, m) => { if (!c) throw new Error(m); };
 
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: "ko-KR", timezoneId: "Asia/Seoul" });
+// 로컬 밖으로 나가는 요청은 모두 막고 기록한다 (빌드가 다른 DB를 가리키면 여기서 드러남)
+const blocked = [];
+await ctx.route("**/*", (route) => {
+  const u = route.request().url();
+  if (u.startsWith("data:") || u.startsWith("blob:") || isLocal(u)) return route.fallback();
+  blocked.push(new URL(u).host);
+  return route.abort("blockedbyclient");
+});
 const page = await ctx.newPage();
 page.setDefaultTimeout(15000);
 const uli = () => page.locator('section[aria-labelledby="home-question"] svg[role="img"]').first().getAttribute("aria-label");
@@ -218,6 +236,12 @@ await step("9. 다른 사람(B)은 A 기록을 볼 수 없음 (RLS) / A 홈 상�
   await page2.close();
 });
 
+await step("10. 로컬 밖으로 나간 요청 없음", null, async () => {
+  ok(blocked.length === 0, `막은 외부 요청: ${[...new Set(blocked)].join(", ")}`);
+});
+
 await browser.close();
-console.log("\nSUMMARY", results.filter((r) => r[0] === "PASS").length, "/", results.length);
-for (const r of results.filter((r) => r[0] === "FAIL")) console.log("FAIL:", r[1], "→", r[2]);
+const failed = results.filter((r) => r[0] === "FAIL");
+console.log("\nSUMMARY", results.length - failed.length, "/", results.length, "· 화면:", SHOTS);
+for (const r of failed) console.log("FAIL:", r[1], "→", r[2]);
+process.exit(failed.length ? 1 : 0);
