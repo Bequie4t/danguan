@@ -2,9 +2,9 @@ import type { Metadata, Viewport } from "next";
 import AccountMenu from "@/components/AccountMenu";
 import HeaderNav, { HomeLink } from "@/components/HeaderNav";
 import QuietBoundary from "@/components/QuietBoundary";
-// 글꼴(Gothic A1, Jost)은 저장소에 넣어 둔 파일을 이 사이트에서 직접 제공한다.
-// 빌드할 때도, 방문할 때도 구글 서버에 연결하지 않는다. 한글은 글자 범위별 조각으로 나뉘어 있어
-// 브라우저가 화면에 필요한 조각만 내려받는다. 파일을 새로 받으려면: node scripts/fonts/download.mjs
+// 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css의 --font-body).
+// 로고·영어 표제·숫자용 Jost만 저장소에 넣어 둔 파일로 직접 제공한다. 빌드할 때도, 방문할 때도
+// 구글 서버에 연결하지 않는다. 파일을 새로 받으려면: node scripts/fonts/download.mjs
 import "./fonts/fonts.css";
 import "./globals.css";
 

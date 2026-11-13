@@ -97,13 +97,17 @@
   --color-tint-sky: var(--tint-sky);
   --color-on-pastel: var(--on-pastel);
   --color-brand: var(--brand);
-  --font-sans: var(--font-gothic), system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  --font-sans: var(--font-body);
   --font-label: var(--font-jost), system-ui, sans-serif;
 }
 
-/* 글꼴 이름은 src/app/fonts/fonts.css의 @font-face와 같아야 한다. */
+/*
+ * 본문(한글)은 기기에 이미 있는 글꼴을 쓴다 (아이폰·맥: Apple SD Gothic Neo, 윈도우: 맑은 고딕, 안드로이드: 기본 고딕).
+ * 내려받는 글꼴이 없어 가볍고, 글꼴 라이선스 문제도 없다. 기기마다 글자 모양이 조금 다를 수 있다.
+ * 로고·영어 표제·숫자용 Jost만 사이트에서 직접 제공한다 (src/app/fonts/fonts.css, 이름이 같아야 함).
+ */
 :root {
-  --font-gothic: "Gothic A1";
+  --font-body: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
   --font-jost: "Jost";
 }
 
@@ -114,7 +118,7 @@ html {
 body {
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--font-gothic), system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  font-family: var(--font-body);
   font-size: 1.0625rem;
   line-height: 1.7;
   word-break: keep-all;

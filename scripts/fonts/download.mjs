@@ -2,21 +2,28 @@
 // 빌드가 구글 글꼴 서버에 연결하지 않도록, 결과물(src/app/fonts/)을 커밋해 둔다.
 //
 // 사용법: node scripts/fonts/download.mjs
-// 결과물:
-//   src/app/fonts/files/*.woff2   — 글꼴 조각 (한글은 글자 범위별로 나뉘어 있어, 화면에 필요한 조각만 내려받는다)
-//   src/app/fonts/fonts.css       — @font-face 목록 (layout.tsx에서 불러온다)
-//   src/app/fonts/licenses/*.txt  — SIL Open Font License 1.1 원문
+// 결과물 (src/app/fonts/):
+//   files/*.woff2   — 글꼴 조각 (글자 범위별)
+//   fonts.css       — @font-face 목록 (layout.tsx에서 불러온다)
+//   licenses/*.txt  — SIL Open Font License 1.1 원문
 //
-// 같은 글꼴·굵기를 다시 받으면 같은 결과가 나온다 (구글이 글꼴을 갱신하면 달라질 수 있다).
+// 안전장치: 새 결과물을 임시 폴더에 모두 받고 확인한 뒤에만 기존 결과물과 바꾼다.
+// 도중에 실패하면 기존 파일은 그대로 남는다.
+//
+// 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css). 여기에 글꼴을 더할 때는 먼저 제작자 원본 라이선스에
+// 예약 글꼴 이름(Reserved Font Name)이 있는지 확인한다. 웹용으로 나눈 조각은 수정본으로 볼 수 있다.
 import { createHash } from "node:crypto";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const OUT = path.join(ROOT, "src/app/fonts");
-const FILES = path.join(OUT, "files");
-const LICENSES = path.join(OUT, "licenses");
+const APP = path.join(ROOT, "src/app");
+const OUT = path.join(APP, "fonts");
+
+// 시험용: 다른 서버 주소로 바꿔 실패 상황을 재현할 수 있다.
+const CSS_ORIGIN = process.env.FONTS_CSS_ORIGIN ?? "https://fonts.googleapis.com";
+const LICENSE_ORIGIN = process.env.FONTS_LICENSE_ORIGIN ?? "https://raw.githubusercontent.com";
 
 // woff2 형식을 받으려면 최신 브라우저 UA가 필요하다.
 const UA =
@@ -24,16 +31,11 @@ const UA =
 
 const FONTS = [
   {
-    slug: "gothic-a1",
-    family: "Gothic A1",
-    css: "https://fonts.googleapis.com/css2?family=Gothic+A1:wght@400;500;700&display=swap",
-    license: "https://raw.githubusercontent.com/google/fonts/main/ofl/gothica1/OFL.txt",
-  },
-  {
     slug: "jost",
     family: "Jost",
-    css: "https://fonts.googleapis.com/css2?family=Jost:wght@400;500&display=swap",
-    license: "https://raw.githubusercontent.com/google/fonts/main/ofl/jost/OFL.txt",
+    css: `${CSS_ORIGIN}/css2?family=Jost:wght@400;500&display=swap`,
+    // 제작자 원본 라이선스 (예약 글꼴 이름 없음)
+    license: `${LICENSE_ORIGIN}/indestructible-type/Jost/master/OFL.txt`,
   },
 ];
 
@@ -48,43 +50,44 @@ function parseFaces(css) {
   for (const m of css.matchAll(/@font-face\s*\{([^}]*)\}/g)) {
     const body = m[1];
     const pick = (name) => body.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1].trim();
-    const url = body.match(/url\((https:[^)]+)\)/)?.[1];
     const face = {
       style: pick("font-style"),
       weight: pick("font-weight"),
       range: pick("unicode-range"),
-      url,
+      url: body.match(/url\((https:[^)]+)\)/)?.[1],
     };
-    if (!face.style || !face.weight || !face.range || !url) throw new Error(`알 수 없는 @font-face: ${body}`);
+    if (!face.style || !face.weight || !face.range || !face.url) throw new Error(`알 수 없는 @font-face: ${body}`);
     faces.push(face);
   }
+  if (faces.length === 0) throw new Error("@font-face를 찾지 못함");
   return faces;
 }
 
-async function main() {
-  await rm(FILES, { recursive: true, force: true });
-  await mkdir(FILES, { recursive: true });
-  await mkdir(LICENSES, { recursive: true });
+/** 임시 폴더(tmp)에 결과물 전체를 만든다. 실패하면 예외. */
+async function build(tmp) {
+  const files = path.join(tmp, "files");
+  const licenses = path.join(tmp, "licenses");
+  await mkdir(files, { recursive: true });
+  await mkdir(licenses, { recursive: true });
 
   const out = [
     "/* 자동 생성: node scripts/fonts/download.mjs — 직접 고치지 않는다. */",
-    "/* 글꼴: SIL Open Font License 1.1 (licenses/ 폴더). 원본: Google Fonts. */",
+    "/* 글꼴: SIL Open Font License 1.1 (licenses/ 폴더). 파일 출처: Google Fonts. */",
     "",
   ];
   const saved = new Map(); // 같은 파일(가변 글꼴의 여러 굵기)은 한 번만 저장
-  let total = 0;
-
   for (const font of FONTS) {
     const faces = parseFaces(await get(font.css, "text"));
     for (const face of faces) {
       let name = saved.get(face.url);
       if (!name) {
         const data = await get(face.url);
-        const hash = createHash("sha256").update(data).digest("hex").slice(0, 12);
-        name = `${font.slug}-${hash}.woff2`;
-        await writeFile(path.join(FILES, name), data);
+        if (data.length < 100 || data.subarray(0, 4).toString("latin1") !== "wOF2") {
+          throw new Error(`woff2가 아님: ${face.url}`);
+        }
+        name = `${font.slug}-${createHash("sha256").update(data).digest("hex").slice(0, 12)}.woff2`;
+        await writeFile(path.join(files, name), data);
         saved.set(face.url, name);
-        total += data.length;
       }
       out.push(
         "@font-face {",
@@ -97,16 +100,40 @@ async function main() {
         "}",
       );
     }
-    await writeFile(path.join(LICENSES, `${font.slug}-OFL.txt`), await get(font.license, "text"));
+    const license = await get(font.license, "text");
+    if (!license.includes("SIL Open Font License")) throw new Error(`라이선스 원문이 아님: ${font.license}`);
+    await writeFile(path.join(licenses, `${font.slug}-OFL.txt`), license);
     console.log(`${font.family}: @font-face ${faces.length}개`);
   }
-
-  await writeFile(path.join(OUT, "fonts.css"), out.join("\n") + "\n");
-  const count = (await readdir(FILES)).length;
-  console.log(`파일 ${count}개, ${(total / 1024 / 1024).toFixed(2)} MB`);
+  await writeFile(path.join(tmp, "fonts.css"), out.join("\n") + "\n");
+  return saved.size;
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+async function main() {
+  // 같은 디스크 안에 임시 폴더를 만들어야 rename으로 한 번에 바꿀 수 있다.
+  const tmp = await mkdtemp(path.join(APP, ".fonts-new-"));
+  try {
+    const count = await build(tmp);
+    const written = (await readdir(path.join(tmp, "files"))).length;
+    if (written !== count) throw new Error(`파일 수가 맞지 않음: ${written} / ${count}`);
+
+    // 모두 받은 뒤에만 교체: 기존 → 백업, 새것 → 제자리, 백업 삭제
+    const backup = `${OUT}.old-${process.pid}`;
+    const hadOld = await stat(OUT).then(() => true, () => false);
+    if (hadOld) await rename(OUT, backup);
+    try {
+      await rename(tmp, OUT);
+    } catch (err) {
+      if (hadOld) await rename(backup, OUT);
+      throw err;
+    }
+    if (hadOld) await rm(backup, { recursive: true, force: true });
+    console.log(`파일 ${count}개 저장`);
+  } catch (err) {
+    await rm(tmp, { recursive: true, force: true });
+    console.error(`실패 — 기존 글꼴 파일은 바꾸지 않았어요: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+main();
