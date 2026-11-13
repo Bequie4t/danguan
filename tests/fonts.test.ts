@@ -3,9 +3,12 @@
 // - 한글 본문은 기기 기본 글꼴을 쓴다. Gothic A1은 제작자 원본 라이선스가 이름을 예약해 두어,
 //   웹용으로 나눈 조각을 같은 이름으로 재배포하지 않는다 (2026-11-13 결정).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { ROOT, SRC, listFiles } from "./helpers/import-graph";
@@ -75,20 +78,113 @@ test("Jost 사용 허락서(SIL OFL 1.1, 예약 글꼴 이름 없음)가 함께 
   assert.deepEqual(readdirSync(join(FONTS, "licenses")), ["jost-OFL.txt"]);
 });
 
-test("다운로드 스크립트가 실패하면 기존 글꼴 파일을 그대로 둔다", () => {
-  const snapshot = () =>
-    listFiles(FONTS)
-      .map((f) => `${relative(FONTS, f)} ${createHash("sha256").update(readFileSync(f)).digest("hex")}`)
-      .sort();
-  const before = snapshot();
-  // 닿지 않는 주소로 바꿔 내려받기를 실패시킨다 (네트워크 없이도 실패함)
-  const run = spawnSync(process.execPath, [join(ROOT, "scripts", "fonts", "download.mjs")], {
-    env: { ...process.env, FONTS_CSS_ORIGIN: "http://127.0.0.1:9", FONTS_LICENSE_ORIGIN: "http://127.0.0.1:9" },
-    encoding: "utf8",
+// ── 다운로드 스크립트: 저장소 파일 대신 임시 폴더 사본과 모의 서버로 실행한다 ──
+
+const SCRIPT = join(ROOT, "scripts", "fonts", "download.mjs");
+const LATIN = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
+const WOFF2 = Buffer.concat([Buffer.from("wOF2", "latin1"), Buffer.alloc(200, 1)]);
+const OFL = "This Font Software is licensed under the SIL Open Font License, Version 1.1.";
+
+/** 모의 글꼴 서버. weights: CSS에 넣을 굵기, range: 글자 범위, fail: 실패시킬 경로 앞부분 */
+async function mockServer(opts: { weights: readonly string[]; range?: string; fail?: string }) {
+  const server = createServer((req, res) => {
+    const url = req.url ?? "";
+    if (opts.fail && url.startsWith(opts.fail)) return res.writeHead(500).end();
+    if (url.startsWith("/css2")) {
+      const { port } = server.address() as AddressInfo;
+      const css = opts.weights
+        .map((w) => `@font-face {\n  font-family: 'Jost';\n  font-style: normal;\n  font-weight: ${w};\n  font-display: swap;\n  src: url(http://127.0.0.1:${port}/f/${w}.woff2) format('woff2');\n  unicode-range: ${opts.range ?? LATIN};\n}`)
+        .join("\n");
+      return res.writeHead(200, { "content-type": "text/css" }).end(css);
+    }
+    if (url.startsWith("/f/")) return res.writeHead(200).end(WOFF2);
+    if (url.endsWith("OFL.txt")) return res.writeHead(200).end(OFL);
+    res.writeHead(404).end();
   });
-  assert.equal(run.status, 1);
-  assert.match(run.stderr, /기존 글꼴 파일은 바꾸지 않았어요/);
-  assert.deepEqual(snapshot(), before);
-  // 임시 폴더도 남기지 않는다
-  assert.deepEqual(readdirSync(join(SRC, "app")).filter((n) => n.startsWith(".fonts-")), []);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() };
+}
+
+/** 현재 글꼴 폴더 사본이 든 임시 폴더 */
+function sandbox() {
+  const dir = mkdtempSync(join(tmpdir(), "danguan-fonts-"));
+  cpSync(FONTS, join(dir, "fonts"), { recursive: true });
+  return { dir, out: join(dir, "fonts"), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function run(out: string, origin: string) {
+  return new Promise<{ status: number | null; stderr: string; stdout: string }>((resolve) => {
+    const child = spawn(process.execPath, [SCRIPT], {
+      env: { ...process.env, FONTS_OUT_DIR: out, FONTS_CSS_ORIGIN: origin, FONTS_LICENSE_ORIGIN: origin },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+const snapshot = (dir: string) =>
+  listFiles(dir)
+    .map((f) => `${relative(dir, f)} ${createHash("sha256").update(readFileSync(f)).digest("hex")}`)
+    .sort();
+
+test("다운로드: 정상 응답이면 교체하고, 임시·백업 폴더를 남기지 않는다", async () => {
+  const box = sandbox();
+  const srv = await mockServer({ weights: ["400", "500"] });
+  try {
+    const r = await run(box.out, srv.origin);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(join(box.out, "fonts.css"), "utf8"), /font-weight: 500;/);
+    assert.deepEqual(readdirSync(box.dir), ["fonts"]);
+  } finally {
+    srv.close();
+    box.cleanup();
+  }
+});
+
+for (const [name, opts, why] of [
+  ["서버 오류(CSS)", { weights: ["400", "500"], fail: "/css2" }, /500 http/],
+  ["서버 오류(라이선스)", { weights: ["400", "500"], fail: "/indestructible-type" }, /500 http/],
+  ["500 굵기가 빠진 정상 응답", { weights: ["400"] }, /Jost 500 굵기가 없음/],
+  ["숫자가 빠진 글자 범위", { weights: ["400", "500"], range: "U+0041-005A, U+0061-007A" }, /없는 글자: 0123456789/],
+] as const) {
+  test(`다운로드: ${name}이면 실패하고 기존 파일을 그대로 둔다`, async () => {
+    const box = sandbox();
+    const srv = await mockServer(opts);
+    try {
+      const before = snapshot(box.out);
+      const r = await run(box.out, srv.origin);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /기존 글꼴 파일은 바꾸지 않았어요/);
+      assert.match(r.stderr, why);
+      assert.deepEqual(snapshot(box.out), before);
+      assert.deepEqual(readdirSync(box.dir), ["fonts"]);
+    } finally {
+      srv.close();
+      box.cleanup();
+    }
+  });
+}
+
+test("다운로드: 교체 도중 멈춰 백업만 남았으면 다음 실행이 백업을 되돌리고 멈춘다", async () => {
+  const box = sandbox();
+  const srv = await mockServer({ weights: ["400", "500"] });
+  try {
+    const before = snapshot(box.out);
+    renameSync(box.out, join(box.dir, "fonts.old-12345")); // 강제 종료 상황 재현
+    const r = await run(box.out, srv.origin);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /백업을 fonts로 되돌렸어요/);
+    assert.deepEqual(snapshot(box.out), before);
+    assert.deepEqual(readdirSync(box.dir), ["fonts"]);
+  } finally {
+    srv.close();
+    box.cleanup();
+  }
+});
+
+test("저장소 글꼴 폴더 옆에 남은 임시·백업 폴더가 없다", () => {
+  assert.deepEqual(readdirSync(join(SRC, "app")).filter((n) => /^\.fonts-new-|^fonts\.old-/.test(n)), []);
 });
