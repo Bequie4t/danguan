@@ -324,3 +324,24 @@ test("잠금을 얻는 순간 이미 취소돼 있으면 실행하지 않는다 
   assert.deepEqual(await p, { status: "cancelled" });
   assert.equal(ran, false);
 });
+
+test("쓰기는 됐는데 확인 읽기만 실패하면 '실패'가 아니라 '확인 못 함'(방금 쓴 값 포함)으로 돌려준다", () => {
+  const mem = new MemoryStore();
+  let failReads = 0;
+  const flaky: KeyValueStore = {
+    getItem: (k) => { if (failReads > 0) { failReads--; throw new Error("가상 읽기 실패"); } return mem.getItem(k); },
+    setItem: (k, v) => { mem.setItem(k, v); failReads = 1; },
+    removeItem: (k) => mem.removeItem(k),
+  };
+  const card = normalize({ foods: [], people: [], message: "가상 확인 못 함" }, NOW);
+  const r = saveCard(flaky, card, null);
+  assert.equal(r.status, "unverified");
+  if (r.status === "unverified") {
+    assert.equal(mem.getItem(STORAGE_KEY), r.raw, "실제로는 저장됨");
+    // 다음 읽기에서 방금 쓴 값과 같으면 저장된 것. 그 값을 기준으로 다시 저장해도 자기 자신과 충돌하지 않음
+    assert.equal(flaky.getItem(STORAGE_KEY), r.raw);
+    assert.equal(saveCard(flaky, normalize({ foods: [], people: [], message: "가상 다시" }, NOW), r.raw).status === "conflict", false);
+  }
+  const throwsOnSet: KeyValueStore = { getItem: () => null, setItem: () => { throw new Error("x"); }, removeItem: () => {} };
+  assert.deepEqual(saveCard(throwsOnSet, card, null), { status: "failed" }, "쓰기 자체가 실패하면 실패");
+});

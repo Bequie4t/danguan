@@ -143,6 +143,8 @@ export default function HardDayCard() {
   const conflictRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
   const recheckRef = useRef<HTMLButtonElement>(null);
+  /** 지우려던 카드의 원본 (다시 확인할 때 '아직 남음'과 '다른 창이 바꿈'을 구분) */
+  const clearTarget = useRef<string | null>(null);
   /** 클립보드 쓰기는 한 번에 하나만 (겹치면 붙여넣을 값이 안내와 달라질 수 있음) */
   const [copying, setCopying] = useState(false);
   const copyingRef = useRef(false);
@@ -287,7 +289,8 @@ export default function HardDayCard() {
     const now = readRaw(store.current);
     if (now === undefined && r.status !== "failed") {
       // 지금 저장 상태를 읽지 못함: 늦게 온 결과(성공 화면·이전 미리보기)를 지금 상태처럼 보여 주지 않는다. 초안은 남긴다.
-      if (r.status === "saved") baseRaw.current = r.raw; // 다시 저장하면 그때 확인한다
+      // 방금 쓴 값을 기준으로 두어, 다시 저장할 때 내가 저장한 카드와 충돌하지 않게 한다.
+      if (r.status === "saved" || r.status === "unverified") baseRaw.current = r.raw;
       stored.current = null;
       setConflict(null);
       setNotice("save-unknown");
@@ -295,12 +298,14 @@ export default function HardDayCard() {
       setBusy(null);
       return;
     }
-    if (r.status === "saved") {
+    if (r.status === "saved" || r.status === "unverified") {
+      // unverified(확인 읽기만 실패)도 여기서 다시 읽은 값이 방금 쓴 값과 정확히 같으면 저장된 것으로 본다
       if (now !== undefined && now !== r.raw) {
         baseRaw.current = r.raw; // 내가 저장한 버전 기준 → 다시 저장하려면 지금 상태로 확인받는다
         stored.current = now === null ? null : (() => { const p = parseStored(now); return p.status === "ok" ? p.card : null; })();
         setConflict(null);
-        setNotice("changed-after-save");
+        // 확인 읽기를 못 했던 저장이면 '저장 뒤 바뀜'이라고 단정하지 않는다
+        setNotice(r.status === "unverified" ? "save-unknown" : "changed-after-save");
         restoreFocus.current = () => titleRef.current?.focus();
       } else {
         baseRaw.current = r.raw;
@@ -347,16 +352,18 @@ export default function HardDayCard() {
     restoreFocus.current = () => recheckRef.current?.focus();
   }
 
-  /** '저장 상태 다시 확인': 한 번 읽은 값으로 화면을 맞춘다. 또 못 읽으면 그대로 안내 */
+  /** '저장 상태 다시 확인': 저장소를 한 번 읽은 값으로 화면과 안내를 함께 정한다. 못 읽으면 이 화면(버튼)을 그대로 둔다 */
   function recheck() {
-    const raw = readRaw(store.current);
-    if (raw === undefined) {
+    const snap = snapshot(store.current);
+    if (snap.result.status === "unavailable") {
       setNotice("clear-unknown");
-      requestAnimationFrame(() => statusRef.current?.focus());
+      requestAnimationFrame(() => (statusRef.current ?? recheckRef.current)?.focus());
       return;
     }
-    applySnapshot(snapshot(store.current), raw === null ? "cleared" : "clear-not-done");
-    requestAnimationFrame(() => (titleRef.current ?? statusRef.current)?.focus());
+    // 비었으면 지운 것 → 새 카드 입력, 지우려던 그 카드면 아직 남은 것, 다른 카드면 다른 창이 바꾼 것
+    const notice: Notice = snap.raw === null ? "cleared" : snap.raw === clearTarget.current ? "clear-not-done" : "changed-elsewhere";
+    applySnapshot(snap, notice);
+    requestAnimationFrame(() => (snap.raw === null ? statusRef.current : titleRef.current)?.focus());
   }
 
   function viewWithoutSaving() {
@@ -401,32 +408,25 @@ export default function HardDayCard() {
       return;
     }
     const r = locked.value;
-    // 지우기 결과와 상관없이 지금 상태를 한 번 읽어 화면을 맞춘다
+    // 지우기 결과와 상관없이 지금 상태를 '한 번' 읽어, 그 같은 값으로 화면과 안내를 함께 정한다
     // (지우기는 됐는데 확인 읽기만 실패한 경우에도 지운 카드를 계속 보여 주지 않게)
-    const now = readRaw(store.current);
-    if (now === undefined) {
+    const snap = snapshot(store.current);
+    if (snap.result.status === "unavailable") {
+      clearTarget.current = expected;
       showClearUnknown();
       setBusy(null);
       return;
     }
-    if (r.status === "failed") {
-      if (now === null) {
-        applySnapshot({ result: { status: "empty" }, raw: null }, "cleared"); // 실제로는 지워져 있음
-        restoreFocus.current = () => statusRef.current?.focus();
-      } else if (now !== expected) {
-        applySnapshot(snapshot(store.current), "changed-elsewhere");
-        restoreFocus.current = () => (deleteOpenRef.current ?? titleRef.current)?.focus();
-      } else {
-        setConfirmRaw(null);
-        setNotice("clear-failed"); // 카드가 그대로 남아 있음
-      }
+    if (r.status === "failed" && snap.raw === expected) {
+      setConfirmRaw(null);
+      setNotice("clear-failed"); // 카드가 그대로 남아 있음
       setBusy(null);
       return;
     }
-    const snap = snapshot(store.current);
-    const changedSince = r.status === "cleared" ? snap.raw !== null : snap.raw !== r.currentRaw;
-    applySnapshot(snap, r.status === "cleared" ? (changedSince ? "changed-elsewhere" : "cleared") : "clear-conflict");
-    restoreFocus.current = () => (deleteOpenRef.current ?? titleRef.current)?.focus();
+    // 비었으면 지운 것, 확인한 카드가 아닌 다른 카드가 있으면 다른 창이 바꾼 것
+    const notice: Notice = snap.raw === null ? "cleared" : r.status === "conflict" ? "clear-conflict" : "changed-elsewhere";
+    applySnapshot(snap, notice);
+    restoreFocus.current = () => (snap.raw === null ? statusRef.current : deleteOpenRef.current ?? titleRef.current)?.focus();
     setBusy(null);
   }
 

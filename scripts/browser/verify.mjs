@@ -1730,6 +1730,78 @@ try {
       }
     });
 
+    // n번째 이후의 읽기를 실패시키거나(failFrom), 쓰기 직후 읽기 k번을 실패시킨다(failAfterSet)
+    const armReads = (opts) => page.evaluate(([k, o]) => {
+      const S = Storage.prototype; S.__get = S.getItem; S.__set = S.setItem; let count = 0; let afterSet = 0;
+      S.setItem = function (key, v) { S.__set.call(this, key, v); if (key === k && o.failAfterSet) afterSet = o.failAfterSet; };
+      S.getItem = function (key) {
+        if (key === k) {
+          if (afterSet > 0) { afterSet--; throw new Error("가상 확인 읽기 실패"); }
+          count++;
+          if (o.failFrom && count >= o.failFrom) throw new Error("가상 읽기 실패");
+        }
+        return S.__get.call(this, key);
+      };
+    }, [HD_KEY, opts]);
+
+    await scenario("힘든 날 카드: '저장 상태 다시 확인'은 한 번 읽은 값으로 정하고, 못 읽으면 버튼을 그대로 둠 — 비었으면 새 카드 입력", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      try {
+        // 지운 뒤 확인을 못 해 '다시 확인' 화면으로
+        await page.evaluate((k) => { const S = Storage.prototype; S.__g0 = S.getItem; S.__r0 = S.removeItem; let fails = 0;
+          S.removeItem = function (key) { S.__r0.call(this, key); if (key === k) fails = 2; };
+          S.getItem = function (key) { if (key === k && fails > 0) { fails--; throw new Error("x"); } return S.__g0.call(this, key); }; }, HD_KEY);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).waitFor();
+        await page.evaluate(() => { const S = Storage.prototype; S.getItem = S.__g0; S.removeItem = S.__r0; delete S.__g0; delete S.__r0; });
+        // 계속 못 읽으면 버튼이 남음
+        await armReads({ failFrom: 1 });
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.waitForTimeout(200);
+        assert.equal(await page.getByRole("button", { name: "저장 상태 다시 확인" }).count(), 1, "못 읽었는데 다시 확인 버튼이 사라짐");
+        await restoreStorage();
+        // 첫 읽기만 되고 두 번째 읽기가 실패하는 경우에도: 한 번 읽은 값으로 정하므로 새 카드 입력이 열림
+        await armReads({ failFrom: 2 });
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("두 번 읽다가 다시 확인이 실패함"); });
+        await restoreStorage();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+        assert.equal(await page.getByText("이 브라우저에서는 저장할 수 없어요", { exact: false }).count(), 0, "저장이 꺼짐");
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장은 됐는데 확인 읽기만 실패하면 — 다음 읽기가 방금 쓴 값과 같으면 성공, 못 읽으면 초안 유지·다시 저장해도 자기 카드와 충돌 없음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await armReads({ failAfterSet: 1 });
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("저장됐는데 실패로 표시"); });
+        await restoreStorage();
+        // 확인 읽기 + 다시 읽기 모두 실패 → 저장됐는지 모름, 초안 유지
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 두 번째 저장");
+        await armReads({ failAfterSet: 2 });
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor();
+        await restoreStorage();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 두 번째 저장");
+        // 다시 누르면 내가 방금 저장한 카드와 충돌하지 않고 저장됨
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("방금 내가 저장한 카드와 충돌함"); });
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
     await scenario("힘든 날 카드: 탭 사이 잠금을 쓸 수 없는 브라우저는 저장·지우기를 막고, 기존 카드 보기·이번에만 보기는 그대로", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       await sneakWrite("가상 잠금 없는 브라우저의 기존 카드");

@@ -151,7 +151,9 @@ export type SaveResult =
    */
   | { status: "conflict"; currentRaw: string | null }
   /** 저장소를 못 쓰거나 용량 초과 등. 저장되지 않았다. */
-  | { status: "failed" };
+  | { status: "failed" }
+  /** 쓰기는 했지만 확인 읽기가 실패함. raw = 방금 쓴 값 (다음 읽기에서 이 값과 같으면 저장된 것) */
+  | { status: "unverified"; raw: string };
 
 /**
  * 저장하고, 다시 읽어 같은지 확인한다. 확인될 때만 성공.
@@ -163,13 +165,20 @@ export function saveCard(store: KeyValueStore | null, card: HardDayCard, expecte
   const current = readRaw(store);
   if (current === undefined) return { status: "failed" };
   if (current !== expectedRaw) return { status: "conflict", currentRaw: current };
+  const text = JSON.stringify(card);
   try {
-    const text = JSON.stringify(card);
     store.setItem(STORAGE_KEY, text);
-    return store.getItem(STORAGE_KEY) === text ? { status: "saved", raw: text } : { status: "failed" };
   } catch {
-    return { status: "failed" };
+    return { status: "failed" }; // 쓰지 못함 (용량 초과 등)
   }
+  // 쓰기는 됐다. 확인 읽기만 실패하면 '실패'가 아니라 '확인 못 함' — 다음 읽기에서 방금 쓴 값과 같은지 본다.
+  let check: string | null;
+  try {
+    check = store.getItem(STORAGE_KEY);
+  } catch {
+    return { status: "unverified", raw: text };
+  }
+  return check === text ? { status: "saved", raw: text } : { status: "failed" };
 }
 
 export type ClearResult = { status: "cleared" } | { status: "conflict"; currentRaw: string | null } | { status: "failed" };
