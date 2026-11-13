@@ -1838,6 +1838,23 @@ try {
         await unarm();
         assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 적는 중");
         assert.equal(await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).count(), 0, "이전 카드로 돌아가는 버튼이 남음");
+        // (3) 편집만 열고 고치지 않은 탭: 입력칸의 이전 이름·문장을 남기지 않고 '저장 상태 다시 확인'
+        await unarm();
+        await page.getByLabel("먹을 것 1").fill("가상 동네 죽집 소고기죽");
+        await page.getByLabel("먼저 부탁할 사람").fill("민지");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText(/이 기기에 저장했어요\.|다른 창에서 저장된 카드를 지웠어요/).first().waitFor();
+        if (await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).count()) await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click(); // 고치지 않고 열어만 둠
+        await other.reload();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).waitFor();
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("고치지 않은 편집 화면에 지운 카드가 남음"); });
+        await unarm();
+        assert.equal(await page.getByLabel("먹을 것 1").count(), 0, "이전 이름·문장이 입력칸에 남음");
       } finally {
         await unarm();
         await other.close();

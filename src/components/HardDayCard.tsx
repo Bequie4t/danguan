@@ -214,10 +214,12 @@ export default function HardDayCard() {
       const now = readRaw(store.current); // 한 번만 읽은 값으로 판단
       if (now === undefined) {
         // 다른 창의 변경 알림을 받았는데 지금 값을 읽지 못함: 이전 카드를 지금 상태처럼 두지 않는다
-        const { phase: ph0, temporary: temp0 } = live.current;
+        const { phase: ph0, temporary: temp0, draft: d0 } = live.current;
         setConfirmRaw(null);
         setConflict(null);
-        if (ph0 === "view" && !temp0) {
+        // 저장 카드를 보는 중이거나, 편집만 열고 고치지 않은 상태(입력칸 = 저장 카드)면 이전 카드를 숨기고 다시 확인
+        const untouchedEdit = ph0 === "edit" && !temp0 && !!stored.current && sameDraft(d0, fromCard(stored.current));
+        if ((ph0 === "view" && !temp0) || untouchedEdit) {
           const focusInside = document.activeElement !== document.body;
           showClearUnknown("sync", "sync-unknown");
           if (focusInside) requestAnimationFrame(() => recheckRef.current?.focus());
