@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -83,10 +83,12 @@ test("Jost 사용 허락서(SIL OFL 1.1, 예약 글꼴 이름 없음)가 함께 
 const SCRIPT = join(ROOT, "scripts", "fonts", "download.mjs");
 const LATIN = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
 const WOFF2 = Buffer.concat([Buffer.from("wOF2", "latin1"), Buffer.alloc(200, 1)]);
-const OFL = "This Font Software is licensed under the SIL Open Font License, Version 1.1.";
+// 모의 서버가 돌려줄 라이선스: 저장소의 Jost OFL 전문
+const OFL = readFileSync(join(FONTS, "licenses", "jost-OFL.txt"), "utf8");
+const OFL_INTRO_ONLY = "This Font Software is licensed under the SIL Open Font License, Version 1.1.";
 
 /** 모의 글꼴 서버. weights: CSS에 넣을 굵기, range: 글자 범위, fail: 실패시킬 경로 앞부분 */
-async function mockServer(opts: { weights: readonly string[]; range?: string; fail?: string }) {
+async function mockServer(opts: { weights: readonly string[]; range?: string; fail?: string; license?: string }) {
   const server = createServer((req, res) => {
     const url = req.url ?? "";
     if (opts.fail && url.startsWith(opts.fail)) return res.writeHead(500).end();
@@ -98,7 +100,7 @@ async function mockServer(opts: { weights: readonly string[]; range?: string; fa
       return res.writeHead(200, { "content-type": "text/css" }).end(css);
     }
     if (url.startsWith("/f/")) return res.writeHead(200).end(WOFF2);
-    if (url.endsWith("OFL.txt")) return res.writeHead(200).end(OFL);
+    if (url.endsWith("OFL.txt")) return res.writeHead(200).end(opts.license ?? OFL);
     res.writeHead(404).end();
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -149,6 +151,7 @@ for (const [name, opts, why] of [
   ["서버 오류(라이선스)", { weights: ["400", "500"], fail: "/indestructible-type" }, /500 http/],
   ["500 굵기가 빠진 정상 응답", { weights: ["400"] }, /Jost 500 굵기가 없음/],
   ["숫자가 빠진 글자 범위", { weights: ["400", "500"], range: "U+0041-005A, U+0061-007A" }, /없는 글자: 0123456789/],
+  ["라이선스 소개 문장 한 줄뿐인 응답", { weights: ["400", "500"], license: OFL_INTRO_ONLY }, /라이선스 전문이 아님/],
 ] as const) {
   test(`다운로드: ${name}이면 실패하고 기존 파일을 그대로 둔다`, async () => {
     const box = sandbox();
@@ -185,6 +188,45 @@ test("다운로드: 교체 도중 멈춰 백업만 남았으면 다음 실행이
   }
 });
 
+test("다운로드: 다른 실행이 진행 중이면 시작하지 않고, 그 실행의 임시 폴더도 건드리지 않는다", async () => {
+  const box = sandbox();
+  const srv = await mockServer({ weights: ["400", "500"] });
+  try {
+    const before = snapshot(box.out);
+    // 살아 있는 다른 실행을 흉내: 잠금 파일에 지금 살아 있는 프로세스(이 시험) 번호, 진행 중인 임시 폴더
+    writeFileSync(join(box.dir, ".fonts.lock"), String(process.pid));
+    mkdirSync(join(box.dir, ".fonts-new-other"));
+    const r = await run(box.out, srv.origin);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, new RegExp(`다른 실행\\(프로세스 ${process.pid}\\)이 진행 중`));
+    assert.deepEqual(snapshot(box.out), before);
+    assert.deepEqual(readdirSync(box.dir).sort(), [".fonts-new-other", ".fonts.lock", "fonts"]);
+    assert.equal(readFileSync(join(box.dir, ".fonts.lock"), "utf8"), String(process.pid));
+  } finally {
+    srv.close();
+    box.cleanup();
+  }
+});
+
+test("다운로드: 강제 종료로 남은 잠금(이미 끝난 프로세스)은 치우고 진행한다", async () => {
+  const box = sandbox();
+  const srv = await mockServer({ weights: ["400", "500"] });
+  try {
+    // 끝난 프로세스 번호를 얻기: 바로 끝나는 자식 프로세스
+    const dead = await new Promise<number>((resolve) => {
+      const c = spawn(process.execPath, ["-e", ""]);
+      c.on("close", () => resolve(c.pid!));
+    });
+    writeFileSync(join(box.dir, ".fonts.lock"), String(dead));
+    const r = await run(box.out, srv.origin);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(box.dir), ["fonts"]);
+  } finally {
+    srv.close();
+    box.cleanup();
+  }
+});
+
 test("저장소 글꼴 폴더 옆에 남은 임시·백업 폴더가 없다", () => {
-  assert.deepEqual(readdirSync(join(SRC, "app")).filter((n) => /^\.fonts-new-|^fonts\.old-/.test(n)), []);
+  assert.deepEqual(readdirSync(join(SRC, "app")).filter((n) => /^\.fonts-new-|^fonts\.old-|^\.fonts\.lock$/.test(n)), []);
 });

@@ -14,11 +14,13 @@
 //   그 사이에 강제 종료되어 src/app/fonts가 없고 fonts.old-* 백업만 남았다면,
 //   다음 실행이 백업을 자동으로 되돌리고 멈춘다. 손으로 되돌리려면: mv src/app/fonts.old-<번호> src/app/fonts
 // - 어떤 경우든 git으로도 되돌릴 수 있다: git checkout -- src/app/fonts
+// - 동시에 두 번 실행하면 나중 실행은 시작하지 않는다 (잠금 파일 src/app/.fonts.lock, 강제 종료로 남은 잠금은 자동 정리).
+// - 라이선스는 SIL OFL 1.1 전문(정의·조건·종료·면책 조항)이 받아졌을 때만 인정한다.
 //
 // 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css). 여기에 글꼴을 더할 때는 먼저 제작자 원본 라이선스에
 // 예약 글꼴 이름(Reserved Font Name)이 있는지 확인한다. 웹용으로 나눈 조각은 수정본으로 볼 수 있다.
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -134,7 +136,7 @@ async function build(tmp) {
       );
     }
     const license = await get(font.license, "text");
-    if (!license.includes("SIL Open Font License")) throw new Error(`라이선스 원문이 아님: ${font.license}`);
+    if (!isFullOfl(license)) throw new Error(`라이선스 전문이 아님: ${font.license}`);
     await writeFile(path.join(licenses, `${font.slug}-OFL.txt`), license);
     console.log(`${font.family}: @font-face ${faces.length}개`);
   }
@@ -161,10 +163,63 @@ async function recover() {
   return true;
 }
 
+/**
+ * SIL OFL 1.1 전문인지: 소개 문장 한 줄이 아니라 머리말·정의·허락과 조건·종료·면책 조항 제목이 모두 있어야 한다.
+ * (제목 표기는 배포처마다 대소문자·밑줄이 달라 대소문자를 가리지 않는다)
+ */
+function isFullOfl(text) {
+  const t = text.toUpperCase().replace(/\s+/g, " "); // 줄바꿈으로 나뉜 문구도 찾는다
+  return (
+    t.includes("SIL OPEN FONT LICENSE") &&
+    t.includes("VERSION 1.1") &&
+    ["PREAMBLE", "DEFINITIONS", "PERMISSION & CONDITIONS", "TERMINATION", "DISCLAIMER"].every((h) => t.includes(h))
+  );
+}
+
+// 동시에 두 번 실행되지 않게 잠금 파일을 둔다. 다른 실행의 임시 폴더를 지우지 않기 위해서다.
+const LOCK = path.join(PARENT, `.${BASE}.lock`);
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM"; // 다른 사용자 프로세스는 살아 있음
+  }
+};
+
+/** 잠금을 얻으면 풀기 함수를, 다른 실행이 살아 있으면 예외를 돌려준다. 죽은 실행의 잠금은 치운다. */
+async function lock() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(LOCK, "wx");
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      return () => rm(LOCK, { force: true });
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      const pid = Number((await readFile(LOCK, "utf8").catch(() => "")).trim());
+      if (pid && alive(pid)) throw new Error(`다른 실행(프로세스 ${pid})이 진행 중이에요. 끝난 뒤 다시 실행해 주세요.`);
+      await rm(LOCK, { force: true }); // 강제 종료된 실행이 남긴 잠금
+    }
+  }
+  throw new Error(`잠금 파일을 만들 수 없어요: ${LOCK}`);
+}
+
 async function main() {
+  const unlock = await lock();
+  try {
+    await run();
+  } finally {
+    await unlock();
+  }
+}
+
+async function run() {
   if (await recover()) {
     console.error(`지난 실행이 교체 도중 멈춰, 백업을 ${BASE}로 되돌렸어요. 다시 실행해 주세요.`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   // 같은 디스크 안에 임시 폴더를 만들어야 rename으로 한 번에 바꿀 수 있다.
   const tmp = await mkdtemp(path.join(PARENT, `.${BASE}-new-`));
@@ -188,7 +243,7 @@ async function main() {
   } catch (err) {
     await rm(tmp, { recursive: true, force: true });
     console.error(`실패 — 기존 글꼴 파일은 바꾸지 않았어요: ${err.message}`);
-    process.exit(1);
+    process.exitCode = 1; // process.exit()는 잠금 풀기(finally)를 건너뛰므로 쓰지 않는다
   }
 }
 
