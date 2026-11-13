@@ -53,6 +53,7 @@ type Notice =
   | "changed-elsewhere"
   | "changed-while-editing"
   | "preview-removed"
+  | "changed-after-save"
   | "save-cancelled"
   | "clear-cancelled"
   | "lock-busy"
@@ -122,7 +123,8 @@ export default function HardDayCard() {
   const [conflict, setConflict] = useState<{ currentRaw: string | null } | null>(null);
   /** '저장하지 않고 이번에만 보기'로 연 카드 (저장소에 없음) */
   const [temporary, setTemporary] = useState(false);
-  const [copied, setCopied] = useState<{ result: "copied" | "failed"; text: string } | null>(null);
+  /** stale: 복사하는 사이 카드 문장이 바뀜 (누른 문장과 지금 문장이 다름) */
+  const [copied, setCopied] = useState<{ result: "copied" | "failed" | "stale"; text: string } | null>(null);
   /** 잠금을 기다리며 저장·지우는 중 (버튼을 잠시 끈다) */
   /** 잠금을 기다리며 저장·지우는 중. 이때는 입력·화면 전환을 잠시 막고 '취소'만 받는다 */
   const [busy, setBusy] = useState<null | "save" | "clear">(null);
@@ -133,6 +135,10 @@ export default function HardDayCard() {
   const cancelClearRef = useRef<HTMLButtonElement>(null);
   const deleteOpenRef = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef<(() => void) | null>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const conflictRef = useRef<HTMLDivElement>(null);
+  /** 지금 보기 화면에 보이는 부탁 문장 (복사 중 바뀌었는지 확인) */
+  const shownMessage = useRef("");
   const [hostname, setHostname] = useState("");
   /** 탭 사이 잠금을 쓸 수 있는지. 없으면 저장·지우기를 하지 않는다 */
   const [lockable, setLockable] = useState(true);
@@ -147,6 +153,8 @@ export default function HardDayCard() {
   const uid = useId();
   live.current = { phase, temporary, draft, conflictRaw: conflict ? conflict.currentRaw : undefined };
   const confirmClear = confirmRaw !== null;
+  // 보기 화면에 보이는 문장 (보기가 아니면 없음) — 복사 중 카드가 바뀌거나 지워졌는지 확인하는 데 쓴다
+  shownMessage.current = phase === "view" && saved ? saved.message : "";
 
   /** 저장소를 한 번 읽은 값으로 화면을 맞춘다 (처음 열 때·다시 불러올 때) */
   function applySnapshot(snap: Snapshot, fallbackNotice: Notice = null) {
@@ -246,35 +254,58 @@ export default function HardDayCard() {
     const ctrl = new AbortController();
     pending.current = ctrl;
     const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    restoreFocus.current = () => {
+    const backToFrom = () => {
       if (from && from.isConnected && !(from as HTMLButtonElement).disabled) from.focus();
     };
+    restoreFocus.current = backToFrom;
     setBusy("save");
     // 잠금 안에서 다시 읽어 비교한 뒤 쓴다 (다른 탭의 저장·지우기가 끼어들지 못함). 기다리는 동안 취소할 수 있다.
     const locked = await withCardLock(locks.current, () => saveCard(store.current, card, expected), LOCK_TIMEOUT_MS, ctrl.signal);
     pending.current = null;
-    setBusy(null);
     if (locked.status !== "done") {
       setNotice(locked.status === "cancelled" ? "save-cancelled" : locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      setBusy(null);
       return;
     }
     const r = locked.value;
+    // 결과는 잠금 안에서 읽은 값이다. 화면에 반영하기 직전에 지금 저장값을 다시 확인해, 그사이 다른 탭이 바꾼
+    // (그리고 이 화면이 이미 처리했을 수 있는) 상태를 늦게 온 결과로 덮지 않는다. 적던 내용은 그대로 둔다.
+    const now = readRaw(store.current);
     if (r.status === "saved") {
-      baseRaw.current = r.raw;
-      stored.current = card;
-      setConflict(null);
-      setSaved(card);
-      setTemporary(false);
-      setDraft(fromCard(card));
-      setNotice("saved");
-      setCopied(null);
-      setPhase("view");
+      if (now !== undefined && now !== r.raw) {
+        baseRaw.current = r.raw; // 내가 저장한 버전 기준 → 다시 저장하려면 지금 상태로 확인받는다
+        stored.current = now === null ? null : (() => { const p = parseStored(now); return p.status === "ok" ? p.card : null; })();
+        setConflict(null);
+        setNotice("changed-after-save");
+        restoreFocus.current = () => titleRef.current?.focus();
+      } else {
+        baseRaw.current = r.raw;
+        stored.current = card;
+        setConflict(null);
+        setSaved(card);
+        setTemporary(false);
+        setDraft(fromCard(card));
+        setNotice("saved");
+        setCopied(null);
+        setPhase("view");
+        restoreFocus.current = () => titleRef.current?.focus(); // 저장 버튼이 사라지므로 카드 제목으로
+      }
     } else if (r.status === "conflict") {
-      setConflict({ currentRaw: r.currentRaw }); // 또 바뀌었으면 새 버전으로 다시 묻는다
-      setNotice(r.currentRaw === null ? "conflict-removed" : "conflict-changed");
+      const current = now === undefined ? r.currentRaw : now; // 늦게 온 결과 대신 지금 값을 보여 준다
+      if (current === expected) {
+        // 그사이 원래대로 돌아옴(예: 미리보기 카드가 지워짐): 경고할 것이 없다. 다시 누르면 저장된다.
+        setConflict(null);
+        setNotice(current === null ? "preview-removed" : "changed-while-editing");
+        restoreFocus.current = backToFrom;
+      } else {
+        setConflict({ currentRaw: current }); // 또 바뀌었으면 새 버전으로 다시 묻는다
+        setNotice(current === null ? "conflict-removed" : "conflict-changed");
+        restoreFocus.current = () => conflictRef.current?.focus(); // 비교 안내로
+      }
     } else {
       setNotice("save-failed"); // 입력은 그대로 둔다
     }
+    setBusy(null);
   }
 
   function viewWithoutSaving() {
@@ -312,22 +343,25 @@ export default function HardDayCard() {
     setBusy("clear");
     const locked = await withCardLock(locks.current, () => clearCard(store.current, expected), LOCK_TIMEOUT_MS, ctrl.signal);
     pending.current = null;
-    setBusy(null);
     if (locked.status !== "done") {
       setConfirmRaw(null);
       setNotice(locked.status === "cancelled" ? "clear-cancelled" : locked.status === "busy" ? "lock-busy" : "lock-unsupported");
+      setBusy(null);
       return;
     }
     const r = locked.value;
-    if (r.status === "cleared") {
-      applySnapshot({ result: { status: "empty" }, raw: null }, "cleared");
-    } else if (r.status === "conflict") {
-      // 확인한 뒤 다른 창에서 바뀐 카드: 지우지 않고 바뀐 카드를 보여 준 뒤 다시 묻는다
-      applySnapshot({ result: parseStored(r.currentRaw), raw: r.currentRaw }, "clear-conflict");
-    } else {
+    if (r.status === "failed") {
       setConfirmRaw(null);
       setNotice("clear-failed");
+      setBusy(null);
+      return;
     }
+    // 지금 저장값으로 화면을 맞춘다 (지운 뒤 다른 탭이 새로 저장했으면 늦은 결과로 비우지 않고 그 카드를 보여 줌)
+    const snap = snapshot(store.current);
+    const changedSince = r.status === "cleared" ? snap.raw !== null : snap.raw !== r.currentRaw;
+    applySnapshot(snap, r.status === "cleared" ? (changedSince ? "changed-elsewhere" : "cleared") : "clear-conflict");
+    restoreFocus.current = () => (deleteOpenRef.current ?? titleRef.current)?.focus();
+    setBusy(null);
   }
 
   async function copy(text: string) {
@@ -341,7 +375,12 @@ export default function HardDayCard() {
     } catch {
       ok = false;
     }
-    if (!ok && msgRef.current) {
+    // 기다리는 사이 화면의 문장이 바뀌었으면(다른 탭에서 카드 변경) 대체 복사로 새 문장을 복사하지 않는다
+    if (shownMessage.current !== text) {
+      setCopied({ result: "stale", text: shownMessage.current });
+      return;
+    }
+    if (!ok && msgRef.current && msgRef.current.value === text) {
       msgRef.current.select();
       try {
         ok = document.execCommand("copy");
@@ -371,6 +410,7 @@ export default function HardDayCard() {
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
     "preview-removed": "다른 창에서 미리보기의 카드를 지웠어요. 적은 내용은 그대로 있어요. 저장하면 다시 확인해요.",
+    "changed-after-save": "저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요. 적은 내용은 그대로 있고, 다시 저장하려면 확인해요.",
     "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",
     "clear-cancelled": "지우기를 취소했어요. 카드는 그대로 있어요.",
     "lock-busy": "다른 창에서 카드를 저장하거나 지우는 중이에요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 눌러 주세요.",
@@ -380,7 +420,9 @@ export default function HardDayCard() {
   const header = (
     <div className="space-y-2">
       <span className="eyebrow">HARD DAY CARD</span>
-      <h1 className="text-2xl leading-snug font-bold">힘든 날 카드</h1>
+      <h1 ref={titleRef} tabIndex={-1} className="text-2xl leading-snug font-bold focus:outline-none focus-visible:outline-2">
+        힘든 날 카드
+      </h1>
       <p className="text-muted">괜찮은 날 미리 적어 두면, 힘든 날 생각하지 않고 꺼내 쓸 수 있어요.</p>
       <p role="status" aria-live="polite" className="min-h-6 font-semibold">
         {notice && noticeText[notice]}
@@ -521,7 +563,7 @@ export default function HardDayCard() {
               있어요. 함께 쓰는 기기라면 ‘저장하지 않고 이번에만 보기’를 골라 주세요. 서버나 계정에는 올리지 않아요.
             </p>
             {conflict ? (
-              <div role="group" aria-label="다른 창의 변경" className="space-y-2">
+              <div ref={conflictRef} tabIndex={-1} role="group" aria-label="다른 창의 변경 — 저장하지 않았어요" className={`space-y-2 ${focusRing}`}>
                 <ConflictPreview raw={conflict.currentRaw} />
                 <button type="button" onClick={() => void save(true)} disabled={!canSave} className={`pastel-fill ${bigButton} disabled:opacity-50`}>
                   {conflict.currentRaw === null ? "그래도 지금 적은 내용으로 새로 저장하기" : "그래도 지금 적은 내용으로 바꾸기"}
@@ -644,6 +686,7 @@ export default function HardDayCard() {
             <p aria-live="polite" className="min-h-6 text-sm">
               {copiedNow === "copied" && "복사했어요. 메시지 앱이나 카카오톡에 붙여 넣어 직접 보내 주세요."}
               {copiedNow === "failed" && "복사하지 못했어요. 문장을 길게 눌러 직접 복사해 주세요."}
+              {copiedNow === "stale" && "복사하는 사이 다른 창에서 카드 문장이 바뀌었어요. 새 문장을 확인하고 다시 눌러 주세요."}
             </p>
           </>
         ) : (

@@ -1484,6 +1484,105 @@ try {
       }
     });
 
+    // 잠금 안의 저장소 작업 '직후'(결과가 화면에 반영되기 전)에 다른 탭이 지운 것처럼 만든다
+    const afterLockedOp = (op) => page.evaluate(([k, op]) => {
+      const S = Storage.prototype; S.__set = S.setItem; S.__get = S.getItem; let armed = true;
+      const removeSoon = (store) => queueMicrotask(() => S.removeItem.call(store, k));
+      if (op === "set") S.setItem = function (key, v) { S.__set.call(this, key, v); if (key === k && armed) { armed = false; removeSoon(this); } };
+      else S.getItem = function (key) { const v = S.__get.call(this, key); if (key === k && armed && v !== null) { armed = false; removeSoon(this); } return v; };
+    }, [HD_KEY, op]);
+    const restoreStorage = () => page.evaluate(() => { const S = Storage.prototype; if (S.__set) { S.setItem = S.__set; delete S.__set; } if (S.__get) { S.getItem = S.__get; delete S.__get; } });
+
+    await scenario("힘든 날 카드: 저장 직후 다른 탭이 지우면, 늦게 온 '저장 성공'으로 지운 카드를 보여 주지 않고 초안은 남김", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await afterLockedOp("set");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("늦게 온 저장 결과로 지운 카드를 보여 줌"); });
+        await restoreStorage();
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null);
+        assert.equal(await page.getByRole("button", { name: "카드 고치기" }).count(), 0, "지운 카드의 보기 화면이 뜸");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽", "초안이 사라짐");
+        // 다시 저장하려면 '지워졌어요' 확인
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 충돌 결과가 늦게 오는 사이 그 카드가 지워지면, 지운 카드를 미리보기로 보여 주지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 내 초안");
+        await sneakWrite("가상곧지워질문장");
+        await afterLockedOp("get"); // 잠금 안에서 '가상곧지워질문장'을 읽은 직후 지워짐
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("지운 카드 기준의 늦은 충돌 결과를 그대로 보여 줌"); });
+        await restoreStorage();
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상곧지워질문장"), "지운 카드가 미리보기에 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 내 초안");
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 복사가 늦게 실패하는 사이 다른 탭이 문장을 바꾸면, 새 문장을 대신 복사하지 않고 다시 누르도록 안내", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.evaluate(() => {
+          window.__copied = [];
+          Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: () => new Promise((_, rej) => { window.__failCopy = () => rej(new Error("가상 실패")); }) } });
+          document.execCommand = (cmd) => { window.__copied.push(String(window.getSelection?.() ?? "") || document.activeElement?.value || ""); return true; };
+        });
+        await page.getByRole("button", { name: "문장 복사하기" }).click();
+        await page.waitForFunction(() => typeof window.__failCopy === "function");
+        // 다른 탭이 카드 문장을 바꿈 → 이 탭의 보기도 새 문장으로 바뀜
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "카드 고치기" }).click();
+        await other.getByLabel("부탁 문장 (선택)").fill("가상 새 부탁 문장 B");
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("가상 새 부탁 문장 B", { exact: false }).first().waitFor();
+        await page.evaluate(() => window.__failCopy());
+        await page.getByText("복사하는 사이 다른 창에서 카드 문장이 바뀌었어요.", { exact: false }).waitFor();
+        assert.deepEqual(await page.evaluate(() => window.__copied), [], "누르지 않은 새 문장을 대신 복사함");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 키보드로 저장하면 성공 뒤 카드 제목으로, 충돌이면 비교 안내로 초점이 감", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.tagName === "H1").catch(async () => { throw new Error(`저장 뒤 초점이 제목으로 가지 않음: ${await page.evaluate(() => document.activeElement?.tagName)}`); });
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 초안");
+        await sneakWrite("가상 다른 탭 변경");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.locator("[data-conflict-preview]").waitFor();
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label")?.startsWith("다른 창의 변경")).catch(async () => { throw new Error(`충돌 뒤 초점이 비교 안내로 가지 않음: ${await page.evaluate(() => document.activeElement?.tagName)}`); });
+      } finally {
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
     await scenario("힘든 날 카드: 탭 사이 잠금을 쓸 수 없는 브라우저는 저장·지우기를 막고, 기존 카드 보기·이번에만 보기는 그대로", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       await sneakWrite("가상 잠금 없는 브라우저의 기존 카드");
