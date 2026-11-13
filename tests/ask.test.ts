@@ -99,9 +99,9 @@ test("복사하는 사이 문장이 바뀌면, 끝난 복사(이전 문장)를 �
   const a = currentText(initialAskState);
   let s = askReducer(initialAskState, { type: "edit", value: "가상 B 문장" });
   s = askReducer(s, { type: "copied", ok: true, text: a }); // A 복사가 늦게 끝남
-  assert.equal(s.copied, "idle", "B 화면에 '복사했어요'가 뜨면 안 됨");
+  assert.equal(s.copied, "stale", "B 화면에 '복사했어요'가 뜨면 안 되고, 다시 누르라고 안내");
   s = askReducer(s, { type: "copied", ok: false, text: a });
-  assert.equal(s.copied, "idle", "A 복사 실패도 B에 표시하지 않음");
+  assert.equal(s.copied, "stale", "A 복사 실패도 B의 결과로 표시하지 않음");
   s = askReducer(s, { type: "copied", ok: true, text: "가상 B 문장" });
   assert.equal(s.copied, "copied");
 });

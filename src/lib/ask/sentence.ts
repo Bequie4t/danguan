@@ -92,7 +92,7 @@ export interface AskState extends AskInput {
   /** 사용자가 직접 고친 문장 (null이면 자동으로 만든 문장을 쓴다) */
   edited: string | null;
   /** 복사 결과 안내: 복사는 '보냄'이 아니다 */
-  copied: "idle" | "copied" | "failed";
+  copied: "idle" | "copied" | "failed" | "stale";
 }
 
 export const initialAskState: AskState = { kind: "clinic", name: "", detail: "", soften: true, edited: null, copied: "idle" };
@@ -125,8 +125,8 @@ export function askReducer(state: AskState, action: AskAction): AskState {
     case "regenerate":
       return { ...state, edited: null, copied: "idle" };
     case "copied":
-      // 복사하는 사이 문장이 바뀌었으면 결과를 표시하지 않는다 (바뀐 문장이 복사된 것처럼 보이지 않게)
-      if (action.text !== currentText(state)) return state;
+      // 복사하는 사이 문장이 바뀌었으면 결과 대신 '다시 눌러 주세요'를 보여 준다 (바뀐 문장이 복사된 것처럼 보이지 않게)
+      if (action.text !== currentText(state)) return { ...state, copied: "stale" };
       // 빈 문장은 복사 성공으로 표시하지 않는다
       if (!canSend(action.text)) return { ...state, copied: "failed" };
       return { ...state, copied: action.ok ? "copied" : "failed" };

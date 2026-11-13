@@ -4,7 +4,7 @@
 //  - 상황 고르기 → 문장 만들기 → 고치기 → 복사하거나 메시지 앱으로 넘기기.
 //  - 앱이 대신 보내지 않는다. 복사를 '보냄'으로 기록하거나 표시하지 않는다.
 //  - 받는 사람 이름과 문장은 이 화면 안에만 있다. 저장·전송·로그 없음 (로그인·저장 코드를 가져오지 않음).
-import { useId, useReducer, useRef } from "react";
+import { useId, useReducer, useRef, useState } from "react";
 import {
   ASK_OPTIONS,
   NAME_MAX,
@@ -27,10 +27,25 @@ export default function AskBuilder() {
   const text = currentText(state);
   const sendable = canSend(text);
 
+  // 클립보드 쓰기는 한 번에 하나만 (겹치면 실제로 붙여넣을 문장과 안내가 달라질 수 있음)
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
+
   async function copy() {
     // 복사를 시작할 때의 문장. 끝났을 때 문장이 그대로일 때만 '복사했어요'를 보여 준다 (reducer가 비교).
     const target = text;
-    if (!canSend(target)) return;
+    if (!canSend(target) || copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      dispatch({ type: "copied", ok: await writeOnce(target), text: target });
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
+  }
+
+  async function writeOnce(target: string): Promise<boolean> {
     let ok = false;
     try {
       if (navigator.clipboard?.writeText) {
@@ -40,8 +55,9 @@ export default function AskBuilder() {
     } catch {
       ok = false;
     }
-    if (!ok && textRef.current) {
-      // 클립보드 권한이 없을 때: 문장을 선택해 두고 기기 복사 기능을 쓴다
+    // 클립보드 권한이 없을 때: 문장을 선택해 기기 복사 기능을 쓴다.
+    // 단, 누른 문장이 그대로일 때만 (기다리는 사이 고친 다른 문장을 대신 복사하지 않게)
+    if (!ok && textRef.current && textRef.current.value === target) {
       textRef.current.select();
       try {
         ok = document.execCommand("copy");
@@ -49,7 +65,7 @@ export default function AskBuilder() {
         ok = false;
       }
     }
-    dispatch({ type: "copied", ok, text: target });
+    return ok;
   }
 
   return (
@@ -180,11 +196,12 @@ export default function AskBuilder() {
           <button
             type="button"
             onClick={() => void copy()}
-            disabled={!sendable}
+            disabled={!sendable || copying}
+            aria-busy={copying || undefined}
             aria-describedby={ids.status}
             className={`pastel-fill flex min-h-12 items-center justify-center rounded-full px-5 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`}
           >
-            복사하기
+            {copying ? "복사 중…" : "복사하기"}
           </button>
           {sendable ? (
             <a
@@ -207,6 +224,7 @@ export default function AskBuilder() {
           {!sendable && "보낼 문장이 비어 있어요. 문장을 쓰거나 ‘처음 문장으로’를 눌러 주세요."}
           {sendable && state.copied === "copied" && "복사했어요. 카카오톡이나 메시지 앱에 붙여 넣어 직접 보내 주세요."}
           {sendable && state.copied === "failed" && "복사하지 못했어요. 문장을 길게 눌러 직접 복사해 주세요."}
+          {sendable && state.copied === "stale" && "복사하는 사이 문장이 바뀌었어요. 지금 문장을 확인하고 다시 눌러 주세요."}
         </p>
         <p className="text-sm text-muted">휴대폰에 따라 메시지 앱에 문장이 채워지지 않을 수 있어요. 그럴 땐 복사해서 붙여 넣어 주세요.</p>
       </div>

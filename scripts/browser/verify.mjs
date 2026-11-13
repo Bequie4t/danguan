@@ -752,6 +752,23 @@ try {
       assert.equal(await page.evaluate(() => window.__clip[1].t), "가상 B 문장");
     });
 
+    await scenario("부탁하기: 복사는 한 번에 하나('복사 중…'), 늦게 실패해도 고친 다른 문장을 대신 복사하지 않고 다시 누르라고 안내", async () => {
+      await openAsk();
+      await page.evaluate(() => {
+        window.__clip = []; window.__exec = [];
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((res, rej) => { window.__clip.push({ t, res, rej }); }) } });
+        document.execCommand = () => { window.__exec.push(document.activeElement?.value ?? ""); return true; };
+      });
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.getByRole("button", { name: "복사 중…" }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "복사 중…" }).isDisabled(), true);
+      await sentence().fill("가상 B 문장");
+      await page.evaluate(() => window.__clip[0].rej(new Error("가상 늦은 실패")));
+      await page.getByText("복사하는 사이 문장이 바뀌었어요.", { exact: false }).waitFor();
+      assert.deepEqual(await page.evaluate(() => window.__exec), [], "누르지 않은 B를 대신 복사함");
+      assert.equal(await page.evaluate(() => window.__clip.length), 1, "진행 중에 두 번째 쓰기가 시작됨");
+    });
+
     await scenario("부탁하기: 고친 문장은 상황을 바꿔도 그대로, 빈 문장이면 복사·메시지 앱 버튼이 꺼짐, 복사가 첫 버튼", async () => {
       await openAsk();
       const buttons = await page.locator("main").getByRole("button", { name: /^(복사하기|메시지 앱으로)$/ }).or(page.locator("main").getByRole("link", { name: "메시지 앱으로" })).allInnerTexts();
