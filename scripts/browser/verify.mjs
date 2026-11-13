@@ -20,7 +20,10 @@ await build({
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
-    b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: 'import React from "react"; export default function Link({children,...props}) { return React.createElement("a",props,children); }', loader: "js", resolveDir: root }));
+    b.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: "navigation", namespace: "fixture" }));
+    b.onLoad({ filter: /^link$/, namespace: "fixture" }, () => ({ contents: 'import React from "react"; export default function Link({children,...props}) { return React.createElement("a",props,children); }', loader: "js", resolveDir: root }));
+    // 머리글 시험용: 지금 주소를 그대로 돌려준다
+    b.onLoad({ filter: /^navigation$/, namespace: "fixture" }, () => ({ contents: "export function usePathname() { return location.pathname; }", loader: "js", resolveDir: root }));
   } }],
 });
 const js = await readFile(resolve(work, "fixture.js"));
@@ -509,6 +512,157 @@ try {
       assert.equal(creates.length, 0);
       await page.evaluate(() => window.__fixture.setConsent(window.__fixture.A, true));
     });
+
+    // 도움 화면: 색 대비 계산 (CSS 색을 캔버스로 sRGB로 바꿔 WCAG 대비를 구함)
+    const helpContrast = () => page.evaluate(() => {
+      const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+      const cx = cv.getContext("2d", { willReadFrequently: true });
+      const rgba = (c) => { cx.clearRect(0, 0, 1, 1); cx.fillStyle = "#000"; cx.fillStyle = c; cx.fillRect(0, 0, 1, 1); const d = cx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+      const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 0.99) return c; } return rgba(getComputedStyle(document.body).backgroundColor); };
+      const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (el) => { const bg = bgOf(el); let fg = rgba(getComputedStyle(el).color); fg = [0, 1, 2].map((i) => fg[i] * fg[3] + bg[i] * (1 - fg[3])); const a = lum(fg), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+      const out = [];
+      for (const card of document.querySelectorAll("[data-help-number]")) for (const span of card.querySelectorAll("span")) if (span.children.length === 0 && span.textContent.trim()) out.push({ text: span.textContent.trim().slice(0, 12), ratio: Math.round(ratio(span) * 100) / 100 });
+      for (const el of document.querySelectorAll("main p, main h1, main h2, main a[download], main li")) if (el.textContent.trim()) out.push({ text: el.textContent.trim().slice(0, 12), ratio: Math.round(ratio(el) * 100) / 100 });
+      return out;
+    });
+
+    await scenario("도움 화면: 109가 맨 위·가장 크게, 모든 번호가 전화 링크, 저장·출처·확인 날짜 유지", async () => {
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const cards = await page.locator("[data-help-number]").evaluateAll((els) => els.map((a) => {
+        const nums = [...a.querySelectorAll("span")].filter((s) => /^[0-9-]+$/.test(s.textContent.trim()));
+        const r = a.getBoundingClientRect();
+        return { number: a.dataset.helpNumber, href: a.getAttribute("href"), label: a.getAttribute("aria-label"), size: parseFloat(getComputedStyle(nums[0]).fontSize), top: r.top, h: r.height, w: r.width };
+      }));
+      assert.deepEqual(cards.map((c) => c.number), ["109", "1577-0199", "119", "112"]);
+      assert.deepEqual(cards.map((c) => c.href), ["tel:109", "tel:15770199", "tel:119", "tel:112"]);
+      for (const c of cards) { assert.ok(c.h >= 44 && c.w >= 44, `${c.number} 누르는 영역이 작음`); assert.ok(c.label.includes(c.number) && c.label.includes("전화 걸기")); }
+      const described = await page.locator("[data-help-number]").evaluateAll((els) => els.map((a) => document.getElementById(a.getAttribute("aria-describedby") ?? "")?.textContent ?? ""));
+      assert.ok(described.every((t) => t.length > 5), "번호마다 상세 안내가 설명(aria-describedby)으로 연결돼야 함");
+      assert.ok(cards[0].size > Math.max(...cards.slice(1).map((c) => c.size)), "109가 가장 크지 않음");
+      assert.ok(cards[0].top < cards[1].top, "109가 맨 위가 아님");
+      assert.equal(await page.locator('a[href="/help/contact-card"][download]').count(), 1, "연락처 저장 링크");
+      const text = await page.locator("#root").innerText();
+      assert.ok(text.includes("2026년 10월 8일에 공식 기관 누리집을 기준으로 확인"), "확인 날짜");
+      assert.ok(text.includes("안전을 보장하지 않아요"));
+      assert.ok((await page.locator('a[target="_blank"][rel~="noopener"]').count()) >= 6, "출처 링크");
+      assert.equal(await page.locator('svg[role="img"]').count(), 0, "도움 화면에 울이·그림 없음");
+      const low = (await helpContrast()).filter((x) => x.ratio < 4.5);
+      assert.deepEqual(low, [], "밝은 화면 글씨 대비 4.5:1 미만");
+    });
+
+    await scenario("도움 화면: 어두운 화면에서도 글씨 대비 4.5:1 이상", async () => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const low = (await helpContrast()).filter((x) => x.ratio < 4.5);
+      await page.emulateMedia({ colorScheme: "light" });
+      assert.deepEqual(low, [], "어두운 화면 글씨 대비 4.5:1 미만");
+    });
+
+    await scenario("도움 화면: 200% 확대(폭 절반)에서도 가로로 넘치지 않고 번호가 다 보임", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const measure = () => page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        cut: [...document.querySelectorAll("[data-help-number]")].filter((a) => a.scrollWidth > a.clientWidth + 1).map((a) => a.dataset.helpNumber),
+        smallest: Math.min(...[...document.querySelectorAll("[data-help-number] span")].filter((s) => /^[0-9-]+$/.test(s.textContent.trim())).map((s) => parseFloat(getComputedStyle(s).fontSize))),
+      }));
+      const r = await measure();
+      // 설치된 글꼴에 따라 폭이 달라지므로, 일부러 넓은 글꼴로도 확인한다 (CI 기기에서 잘렸던 경우)
+      await page.addStyleTag({ content: '[data-help-number] span { font-family: "DejaVu Sans Mono", "Courier New", monospace !important; letter-spacing: 0.06em !important; }' });
+      const wide = await measure();
+      await page.setViewportSize(vp);
+      assert.ok(r.overflow <= 0, `가로로 ${r.overflow}px 넘침`);
+      assert.deepEqual(r.cut, [], "카드 밖으로 넘친 내용(번호·이름)");
+      assert.ok(wide.overflow <= 0, `넓은 글꼴에서 가로로 ${wide.overflow}px 넘침`);
+      assert.deepEqual(wide.cut, [], "넓은 글꼴에서 카드 밖으로 넘친 내용(번호·이름)");
+      assert.ok(r.smallest >= 16, `번호 글씨가 너무 작아짐: ${r.smallest}px`);
+    });
+
+    await scenario("도움 화면: 키보드 Tab으로 109부터 차례로 이동", async () => {
+      await page.goto(`${base}/?screen=help`);
+      await page.locator('[data-help-number="109"]').waitFor();
+      const order = [];
+      for (let i = 0; i < 4; i++) { await page.keyboard.press("Tab"); order.push(await page.evaluate(() => document.activeElement?.getAttribute("data-help-number"))); }
+      assert.deepEqual(order, ["109", "1577-0199", "119", "112"]);
+      const ring = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+      assert.notEqual(ring, "none", "키보드 초점 표시 없음");
+    });
+
+    await scenario("머리글: 기록 작성 중 지금 화면 메뉴('오늘 기록')를 다시 눌러도 새로 열지 않고 입력 유지", async () => {
+      await page.goto(`${base}/today?screen=today-nav`);
+      await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+      await prepare("가상 작성 중 메모");
+      await page.evaluate(() => { window.__noReload = true; });
+      const today = page.getByRole("link", { name: "오늘 기록", exact: true });
+      assert.equal(await today.getAttribute("aria-current"), "page");
+      assert.equal(await page.getByRole("link", { name: "내 기록", exact: true }).getAttribute("aria-current"), null);
+      await page.evaluate(() => window.scrollTo(0, 400));
+      await today.click();
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => window.__noReload === true), true, "화면이 새로 열림");
+      assert.equal(new URL(page.url()).pathname, "/today");
+      assert.equal(await page.locator("#note").inputValue(), "가상 작성 중 메모", "작성 중 메모가 사라짐");
+      assert.equal(await page.getByRole("button", { name: "버거워요", exact: true }).getAttribute("aria-pressed"), "true", "고른 버거움이 사라짐");
+      // 키보드(Enter)로 눌러도 같음
+      await today.focus();
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => window.__noReload === true), true, "Enter로 화면이 새로 열림");
+      assert.equal(await page.locator("#note").inputValue(), "가상 작성 중 메모");
+      // 다른 화면 링크는 그대로 이동
+      await page.getByRole("link", { name: "내 기록", exact: true }).click();
+      await page.waitForURL(/\/records(\?|$)/);
+      assert.equal(await page.evaluate(() => window.__noReload === true), false);
+    });
+
+    // 저장 중·저장 실패 화면에서도 '도움이 필요해요'는 확인창 없이 바로 이동 (다른 링크는 계속 물음)
+    for (const phase of ["saving", "failed"]) {
+      await scenario(`기록 ${phase === "saving" ? "저장 중" : "저장 실패 직후"}: 도움 버튼은 확인창 없이 바로 이동, 다른 링크는 떠나기 전에 물음`, async () => {
+        const dialogs = [];
+        const onDialog = (d) => { dialogs.push(d.type()); void d.dismiss(); }; // 취소 = 이 화면에 남기
+        page.on("dialog", onDialog);
+        const start = async () => {
+          await page.goto(`${base}/?screen=form-help`);
+          await page.getByRole("heading", { name: "지금 어느 정도 버거운가요?", exact: true }).waitFor();
+          await prepare("가상 도움 이동 메모");
+          if (phase === "saving") await page.evaluate(() => window.__fixture.hold("create_checkin"));
+          else await page.evaluate(() => { window.__fixture.failure = "request_error"; });
+          await page.getByRole("button", { name: "저장하기", exact: true }).click();
+          if (phase === "saving") await page.waitForFunction(() => window.__fixture.started("create_checkin"));
+          else await page.getByRole("button", { name: "다시 저장하기", exact: true }).waitFor();
+        };
+        try {
+          // 1) 다른 링크: 떠나기 전 확인이 뜨고, 취소하면 남는다 (확인 장치가 그대로 동작하는지)
+          await start();
+          await page.getByRole("link", { name: "다른 화면" }).click({ noWaitAfter: true });
+          await page.waitForTimeout(800);
+          assert.deepEqual(dialogs, ["beforeunload"], "다른 링크에서 떠나기 전 확인이 떠야 함");
+          assert.equal(new URL(page.url()).pathname, "/");
+          assert.equal(await page.locator("#note").inputValue(), "가상 도움 이동 메모");
+          // 2) 도움 버튼: 확인 없이 바로 이동 (마우스)
+          dialogs.length = 0;
+          await page.getByRole("link", { name: "도움이 필요해요" }).click();
+          await page.waitForURL(/\/help-target/);
+          assert.deepEqual(dialogs, [], "도움 버튼에서 확인창이 뜸");
+          // 3) 도움 버튼: 키보드(Enter)로도 바로 이동
+          await page.evaluate(() => { window.__fixture.failure = null; });
+          await start();
+          dialogs.length = 0;
+          await page.getByRole("link", { name: "도움이 필요해요" }).focus();
+          await page.keyboard.press("Enter");
+          await page.waitForURL(/\/help-target/);
+          assert.deepEqual(dialogs, [], "Enter로 누른 도움 버튼에서 확인창이 뜸");
+        } finally {
+          page.off("dialog", onDialog);
+          await page.evaluate(() => { const f = window.__fixture; if (f) { f.failure = null; f.release?.("create_checkin"); } }).catch(() => {});
+        }
+      });
+    }
 
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
