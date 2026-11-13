@@ -1603,7 +1603,7 @@ try {
         // (1) 저장 성공 결과 + 그 뒤 삭제 + 다시 읽기 실패
         await afterLockedOpThenReadFails("set");
         await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
-        await page.getByText("지금 저장 상태를 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽지 못했는데 이전 결과를 지금 상태처럼 보여 줌"); });
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽지 못했는데 이전 결과를 지금 상태처럼 보여 줌"); });
         await restoreStorage();
         assert.equal(await page.getByText("이 기기에 저장했어요.", { exact: true }).count(), 0, "'저장했어요'가 뜸");
         assert.equal(await page.getByRole("button", { name: "카드 고치기" }).count(), 0, "이전 카드의 보기 화면이 뜸");
@@ -1619,7 +1619,7 @@ try {
         await sneakWrite("가상읽기실패때지워질문장");
         await afterLockedOpThenReadFails("get");
         await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
-        await page.getByText("지금 저장 상태를 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 });
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 });
         await restoreStorage();
         assert.equal(await page.locator("[data-conflict-preview]").count(), 0, "읽지 못했는데 이전 미리보기를 보여 줌");
         assert.ok(!(await page.locator("#root").innerText()).includes("가상읽기실패때지워질문장"), "지운 문장이 보임");
@@ -1630,7 +1630,7 @@ try {
       }
     });
 
-    await scenario("힘든 날 카드: 새 복사가 성공한 뒤 이전 복사가 늦게 실패해도, 최근 요청의 '복사했어요' 안내를 바꾸지 않음", async () => {
+    await scenario("힘든 날 카드: 클립보드 쓰기는 한 번에 하나 — 진행 중에는 '복사 중…'으로 막고, 끝난 뒤 다시 눌러야 새 문장을 씀", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       await openHard(); await fillHard();
       await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
@@ -1638,24 +1638,70 @@ try {
       const other = await context.newPage();
       try {
         await page.evaluate(() => {
-          window.__clip = [];
-          Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((res, rej) => { window.__clip.push({ t, res, rej }); }) } });
+          window.__clip = []; window.__board = null;
+          Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((res, rej) => { window.__clip.push({ t, res: () => { window.__board = t; res(); }, rej }); }) } });
         });
-        await page.getByRole("button", { name: "문장 복사하기" }).click(); // A 요청 (대기)
+        await page.getByRole("button", { name: "문장 복사하기" }).click(); // A (대기)
+        await page.getByRole("button", { name: "복사 중…" }).waitFor();
+        assert.equal(await page.getByRole("button", { name: "복사 중…" }).isDisabled(), true);
+        // 다른 탭이 문장을 B로 바꿔도, A가 끝나기 전에는 새 쓰기가 시작되지 않음
         await other.goto(`${base}/?screen=hardday`);
         await other.getByRole("button", { name: "카드 고치기" }).click();
         await other.getByLabel("부탁 문장 (선택)").fill("가상 새 부탁 문장 B");
         await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
         await page.getByText("가상 새 부탁 문장 B", { exact: false }).first().waitFor();
-        await page.getByRole("button", { name: "문장 복사하기" }).click(); // B 요청
-        await page.evaluate(() => window.__clip[1].res()); // B 성공
+        await page.getByRole("button", { name: "복사 중…" }).click({ force: true }).catch(() => {});
+        assert.equal(await page.evaluate(() => window.__clip.length), 1, "진행 중에 두 번째 쓰기가 시작됨");
+        await page.evaluate(() => window.__clip[0].res()); // A가 늦게 끝남
+        await page.getByText("복사하는 사이 다른 창에서 카드 문장이 바뀌었어요.", { exact: false }).waitFor();
+        // 다시 눌러야 B를 씀 — 붙여넣을 값과 안내가 일치
+        await page.getByRole("button", { name: "문장 복사하기" }).click();
+        await page.evaluate(() => window.__clip[1].res());
         await page.getByText("복사했어요.", { exact: false }).waitFor();
-        await page.evaluate(() => window.__clip[0].rej(new Error("가상 늦은 실패"))); // A 늦게 실패
-        await page.waitForTimeout(300);
-        assert.equal(await page.getByText("복사했어요.", { exact: false }).count(), 1, "B의 성공 안내가 바뀜");
-        assert.equal(await page.getByText("다시 눌러 주세요", { exact: false }).count(), 0);
+        assert.equal(await page.evaluate(() => window.__board), "가상 새 부탁 문장 B", "안내와 실제 복사 값이 다름");
       } finally {
         await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 지우기는 됐는데 확인 읽기만 실패해도 지운 카드를 보여 주지 않음 — 못 읽으면 숨기고 '저장 상태 다시 확인'", async () => {
+      const armClearReadFails = (n) => page.evaluate(([k, n]) => {
+        const S = Storage.prototype; S.__get = S.getItem; S.__rm = S.removeItem; let fails = 0;
+        S.removeItem = function (key) { S.__rm.call(this, key); if (key === k) fails = n; };
+        S.getItem = function (key) { if (key === k && fails > 0) { fails--; throw new Error("가상 읽기 실패"); } return S.__get.call(this, key); };
+      }, [HD_KEY, n]);
+      const unarm = () => page.evaluate(() => { const S = Storage.prototype; if (S.__get) { S.getItem = S.__get; delete S.__get; } if (S.__rm) { S.removeItem = S.__rm; delete S.__rm; } });
+      const saveCardNow = async () => {
+        await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+        await openHard(); await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      };
+      try {
+        // (a) 지우기 안의 확인 읽기만 실패 → 다시 읽으니 비어 있음 → 지운 것으로 표시
+        await saveCardNow();
+        await armClearReadFails(1);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("지워졌는데 '지우지 못했어요'·이전 카드를 보여 줌"); });
+        await unarm();
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "지운 카드가 보임");
+        // (b) 다시 읽기도 실패 → 이전 카드를 숨기고 '저장 상태 다시 확인'
+        await saveCardNow();
+        await armClearReadFails(2);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("카드가 지워졌는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 });
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "이전 카드를 숨기지 않음");
+        assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).count(), 0, "저장 버튼 대신 다시 확인이어야 함");
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "저장 상태 다시 확인");
+        await unarm();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+      } finally {
+        await unarm();
         await page.evaluate(() => localStorage.clear());
       }
     });

@@ -36,7 +36,8 @@ const focusRing = "focus-visible:outline focus-visible:outline-2 focus-visible:o
 const bigButton = `flex min-h-14 w-full items-center justify-center rounded-full px-5 text-lg font-semibold ${focusRing}`;
 
 type Draft = { foods: Food[]; people: string[]; message: string };
-type Phase = "loading" | "edit" | "view";
+/** unknown: 지우기 뒤 저장 상태를 확인하지 못함 — 이전 카드를 숨기고 '저장 상태 다시 확인'만 제공 */
+type Phase = "loading" | "edit" | "view" | "unknown";
 type Notice =
   | null
   | "saved"
@@ -53,7 +54,9 @@ type Notice =
   | "changed-elsewhere"
   | "changed-while-editing"
   | "preview-removed"
-  | "state-unknown"
+  | "save-unknown"
+  | "clear-unknown"
+  | "clear-not-done"
   | "changed-after-save"
   | "save-cancelled"
   | "clear-cancelled"
@@ -139,6 +142,10 @@ export default function HardDayCard() {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const conflictRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
+  const recheckRef = useRef<HTMLButtonElement>(null);
+  /** 클립보드 쓰기는 한 번에 하나만 (겹치면 붙여넣을 값이 안내와 달라질 수 있음) */
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
   /** 가장 최근 복사 요청 번호. 늦게 끝난 이전 요청은 안내를 바꾸지 않는다 */
   const copySeq = useRef(0);
   /** 지금 보기 화면에 보이는 부탁 문장 (복사 중 바뀌었는지 확인) */
@@ -283,7 +290,7 @@ export default function HardDayCard() {
       if (r.status === "saved") baseRaw.current = r.raw; // 다시 저장하면 그때 확인한다
       stored.current = null;
       setConflict(null);
-      setNotice("state-unknown");
+      setNotice("save-unknown");
       restoreFocus.current = () => statusRef.current?.focus();
       setBusy(null);
       return;
@@ -323,6 +330,33 @@ export default function HardDayCard() {
       setNotice("save-failed"); // 입력은 그대로 둔다
     }
     setBusy(null);
+  }
+
+  /** 지우기 뒤 지금 상태를 읽지 못함: 이전 카드를 숨기고 다시 확인하게 한다 */
+  function showClearUnknown() {
+    stored.current = null;
+    baseRaw.current = null;
+    setSaved(null);
+    setConfirmRaw(null);
+    setConflict(null);
+    setTemporary(false);
+    setCopied(null);
+    setDraft(emptyDraft());
+    setPhase("unknown");
+    setNotice("clear-unknown");
+    restoreFocus.current = () => recheckRef.current?.focus();
+  }
+
+  /** '저장 상태 다시 확인': 한 번 읽은 값으로 화면을 맞춘다. 또 못 읽으면 그대로 안내 */
+  function recheck() {
+    const raw = readRaw(store.current);
+    if (raw === undefined) {
+      setNotice("clear-unknown");
+      requestAnimationFrame(() => statusRef.current?.focus());
+      return;
+    }
+    applySnapshot(snapshot(store.current), raw === null ? "cleared" : "clear-not-done");
+    requestAnimationFrame(() => (titleRef.current ?? statusRef.current)?.focus());
   }
 
   function viewWithoutSaving() {
@@ -367,22 +401,25 @@ export default function HardDayCard() {
       return;
     }
     const r = locked.value;
-    if (r.status === "failed") {
-      setConfirmRaw(null);
-      setNotice("clear-failed");
+    // 지우기 결과와 상관없이 지금 상태를 한 번 읽어 화면을 맞춘다
+    // (지우기는 됐는데 확인 읽기만 실패한 경우에도 지운 카드를 계속 보여 주지 않게)
+    const now = readRaw(store.current);
+    if (now === undefined) {
+      showClearUnknown();
       setBusy(null);
       return;
     }
-    // 지금 저장값으로 화면을 맞춘다 (지운 뒤 다른 탭이 새로 저장했으면 늦은 결과로 비우지 않고 그 카드를 보여 줌)
-    if (readRaw(store.current) === undefined) {
-      // 지운 뒤 지금 상태를 읽지 못함: 지운 카드를 다시 보여 주지 않고 알린다
-      stored.current = null;
-      setSaved(null);
-      setConfirmRaw(null);
-      setDraft(emptyDraft());
-      setPhase("edit");
-      setNotice("state-unknown");
-      restoreFocus.current = () => statusRef.current?.focus();
+    if (r.status === "failed") {
+      if (now === null) {
+        applySnapshot({ result: { status: "empty" }, raw: null }, "cleared"); // 실제로는 지워져 있음
+        restoreFocus.current = () => statusRef.current?.focus();
+      } else if (now !== expected) {
+        applySnapshot(snapshot(store.current), "changed-elsewhere");
+        restoreFocus.current = () => (deleteOpenRef.current ?? titleRef.current)?.focus();
+      } else {
+        setConfirmRaw(null);
+        setNotice("clear-failed"); // 카드가 그대로 남아 있음
+      }
       setBusy(null);
       return;
     }
@@ -394,7 +431,18 @@ export default function HardDayCard() {
   }
 
   async function copy(text: string) {
-    if (!canSend(text)) return;
+    if (!canSend(text) || copyingRef.current) return; // 진행 중인 복사가 끝나기 전에는 새로 쓰지 않는다
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      await copyOnce(text);
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
+  }
+
+  async function copyOnce(text: string) {
     const seq = ++copySeq.current;
     let ok = false;
     try {
@@ -442,7 +490,9 @@ export default function HardDayCard() {
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
     "preview-removed": "다른 창에서 미리보기의 카드를 지웠어요. 적은 내용은 그대로 있어요. 저장하면 다시 확인해요.",
-    "state-unknown": "지금 저장 상태를 확인하지 못했어요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 열거나 저장해 보세요.",
+    "save-unknown": "저장됐는지 확인하지 못했어요. 적은 내용은 이 화면에 남아 있어요. 화면을 닫지 말고, 잠시 뒤 ‘이 기기에 저장하기’를 다시 눌러 주세요.",
+    "clear-unknown": "카드가 지워졌는지 확인하지 못했어요. 이전 카드는 화면에서 숨겼어요. 잠시 뒤 저장 상태를 다시 확인해 주세요.",
+    "clear-not-done": "카드가 아직 이 브라우저에 남아 있어요. 지우려면 ‘이 기기에서 지우기’를 다시 눌러 주세요.",
     "changed-after-save": "저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요. 적은 내용은 그대로 있고, 다시 저장하려면 확인해요.",
     "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",
     "clear-cancelled": "지우기를 취소했어요. 카드는 그대로 있어요.",
@@ -464,6 +514,22 @@ export default function HardDayCard() {
   );
 
   if (phase === "loading") return <div className="space-y-6">{header}</div>;
+
+  if (phase === "unknown") {
+    return (
+      <div className="space-y-6">
+        {header}
+        <button
+          ref={recheckRef}
+          type="button"
+          onClick={recheck}
+          className={`pastel-fill ${bigButton}`}
+        >
+          저장 상태 다시 확인
+        </button>
+      </div>
+    );
+  }
 
   if (phase === "edit") {
     return (
@@ -713,8 +779,14 @@ export default function HardDayCard() {
               aria-label="부탁 문장"
               className="w-full resize-none rounded border border-line bg-surface p-3 text-lg leading-relaxed"
             />
-            <button type="button" onClick={() => void copy(message)} className={`pastel-fill ${bigButton}`}>
-              문장 복사하기
+            <button
+              type="button"
+              onClick={() => void copy(message)}
+              disabled={copying}
+              aria-busy={copying || undefined}
+              className={`pastel-fill ${bigButton} disabled:cursor-progress disabled:opacity-70`}
+            >
+              {copying ? "복사 중…" : "문장 복사하기"}
             </button>
             <p aria-live="polite" className="min-h-6 text-sm">
               {copiedNow === "copied" && "복사했어요. 메시지 앱이나 카카오톡에 붙여 넣어 직접 보내 주세요."}
