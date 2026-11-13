@@ -23,15 +23,19 @@ const focusRing = "focus-visible:outline focus-visible:outline-2 focus-visible:o
 export default function AskBuilder() {
   const [state, dispatch] = useReducer(askReducer, initialAskState);
   // 다른 화면에서 상황을 정해 열 수 있다 (예: 예약 대본 → /ask?kind=booking). 정해진 값만 받는다.
+  // 주소의 상황을 확인하기 전(서버가 만든 첫 화면·자바스크립트가 늦게 실행될 때)에는 보내기 버튼을 꺼 둔다.
+  // 그렇지 않으면 예약 전화 부탁으로 왔는데 기본 '병원 동행' 문장이 메시지 앱으로 넘어갈 수 있다.
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     const kind = new URLSearchParams(window.location.search).get("kind");
     if (kind && isAskKind(kind)) dispatch({ type: "pick", kind });
+    setReady(true);
   }, []);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const ids = { detail: useId(), name: useId(), text: useId(), status: useId() };
   const option = ASK_OPTIONS.find((o) => o.kind === state.kind) ?? ASK_OPTIONS[0];
   const text = currentText(state);
-  const sendable = canSend(text);
+  const sendable = ready && canSend(text);
 
   // 클립보드 쓰기는 한 번에 하나만 (겹치면 실제로 붙여넣을 문장과 안내가 달라질 수 있음)
   const [copying, setCopying] = useState(false);
@@ -40,7 +44,7 @@ export default function AskBuilder() {
   async function copy() {
     // 복사를 시작할 때의 문장. 끝났을 때 문장이 그대로일 때만 '복사했어요'를 보여 준다 (reducer가 비교).
     const target = text;
-    if (!canSend(target) || copyingRef.current) return;
+    if (!ready || !canSend(target) || copyingRef.current) return;
     copyingRef.current = true;
     setCopying(true);
     try {
@@ -227,7 +231,8 @@ export default function AskBuilder() {
           )}
         </div>
         <p id={ids.status} aria-live="polite" className="min-h-6 text-sm">
-          {!sendable && "보낼 문장이 비어 있어요. 문장을 쓰거나 ‘처음 문장으로’를 눌러 주세요."}
+          {!ready && "문장을 준비하고 있어요…"}
+          {ready && !sendable && "보낼 문장이 비어 있어요. 문장을 쓰거나 ‘처음 문장으로’를 눌러 주세요."}
           {sendable && state.copied === "copied" && "복사했어요. 카카오톡이나 메시지 앱에 붙여 넣어 직접 보내 주세요."}
           {sendable && state.copied === "failed" && "복사하지 못했어요. 문장을 길게 눌러 직접 복사해 주세요."}
           {sendable && state.copied === "stale" && "복사하는 사이 문장이 바뀌었어요. 지금 문장을 확인하고 다시 눌러 주세요."}

@@ -62,6 +62,11 @@ try {
     // 설정이 잘못된 경우 계정 메뉴의 /login 미리 불러오기가 실패하는 것은 기존 문제라 자원 실패 로그는 따로 센다.
     errors.length = 0; outside.length = 0; scripts.length = 0;
     try {
+      // 서버가 만든 첫 화면(자바스크립트 실행 전)에는 메시지 앱 링크가 없고 복사 버튼이 꺼져 있어야 한다
+      // (예약 전화 부탁으로 왔는데 기본 '병원 동행' 문장이 넘어가지 않게)
+      const raw = await (await ctx.request.get(`${APP}/ask?kind=booking`)).text();
+      assert.ok(!raw.includes('href="sms:'), "자바스크립트 실행 전 메시지 앱 링크에 기본 문장이 들어 있음");
+      assert.match(raw, /<button[^>]*disabled=""[^>]*>복사하기<\/button>/, "자바스크립트 실행 전 복사 버튼이 켜져 있음");
       const res = await page.goto(`${APP}/ask`);
       assert.equal(res.status(), 200, "부탁하기 응답");
       await page.getByRole("textbox", { name: "보낼 문장" }).waitFor({ timeout: 10000 });
