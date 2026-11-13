@@ -22,6 +22,11 @@ export const ASK_OPTIONS: ReadonlyArray<AskOption> = [
   { kind: "booking", label: "예약 전화 대신 걸어 주기", field: null },
 ];
 
+/** 주소(?kind=)로 받은 값이 정해진 상황인지 */
+export function isAskKind(v: string): v is AskKind {
+  return ASK_OPTIONS.some((o) => o.kind === v);
+}
+
 export const SOFTENER = "어려우면 편하게 말해 줘. 괜찮아.";
 export const NAME_MAX = 20;
 

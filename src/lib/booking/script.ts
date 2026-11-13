@@ -111,7 +111,7 @@ export function buildTextMessage(input: BookingInput): string {
 export interface BookingState extends BookingInput {
   /** 글 문의를 직접 고친 문장 (null이면 자동 문장) */
   edited: string | null;
-  copied: "idle" | "copied" | "failed";
+  copied: "idle" | "copied" | "failed" | "stale";
   /** 전화하면서 읽기 편하게 글씨 크게 */
   large: boolean;
 }
@@ -155,7 +155,8 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
     case "regenerate":
       return { ...state, edited: null, copied: "idle" };
     case "copied":
-      if (action.text !== currentMessage(state)) return state;
+      // 복사하는 사이 글이 바뀌었으면 결과 대신 '다시 눌러 주세요'
+      if (action.text !== currentMessage(state)) return { ...state, copied: "stale" };
       if (!canSendMessage(action.text)) return { ...state, copied: "failed" };
       return { ...state, copied: action.ok ? "copied" : "failed" };
     case "large":

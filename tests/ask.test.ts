@@ -13,6 +13,7 @@ import {
   currentText,
   initialAskState,
   smsHref,
+  isAskKind,
   vocative,
   type AskKind,
 } from "../src/lib/ask/sentence";
@@ -134,4 +135,10 @@ test("부탁하기는 로그인·기록 저장·Supabase 코드를 가져오지 
   assert.deepEqual(violations(files), []);
   const mw = readFileSync(join(SRC, "middleware.ts"), "utf8");
   assert.match(mw.match(/matcher\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "", /\|ask\|/, "미들웨어가 /ask를 거치지 않음");
+});
+
+test("다른 화면에서 상황을 정해 열기(?kind=): 정해진 값만 받는다", () => {
+  assert.equal(isAskKind("booking"), true);
+  assert.equal(isAskKind("clinic"), true);
+  for (const bad of ["", "BOOKING", "booking ", "x", "__proto__", "toString"]) assert.equal(isAskKind(bad), false, bad);
 });

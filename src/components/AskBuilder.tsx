@@ -4,12 +4,13 @@
 //  - 상황 고르기 → 문장 만들기 → 고치기 → 복사하거나 메시지 앱으로 넘기기.
 //  - 앱이 대신 보내지 않는다. 복사를 '보냄'으로 기록하거나 표시하지 않는다.
 //  - 받는 사람 이름과 문장은 이 화면 안에만 있다. 저장·전송·로그 없음 (로그인·저장 코드를 가져오지 않음).
-import { useId, useReducer, useRef, useState } from "react";
+import { useEffect, useId, useReducer, useRef, useState } from "react";
 import {
   ASK_OPTIONS,
   NAME_MAX,
   SOFTENER,
   askReducer,
+  isAskKind,
   canSend,
   currentText,
   initialAskState,
@@ -21,6 +22,11 @@ const focusRing = "focus-visible:outline focus-visible:outline-2 focus-visible:o
 
 export default function AskBuilder() {
   const [state, dispatch] = useReducer(askReducer, initialAskState);
+  // 다른 화면에서 상황을 정해 열 수 있다 (예: 예약 대본 → /ask?kind=booking). 정해진 값만 받는다.
+  useEffect(() => {
+    const kind = new URLSearchParams(window.location.search).get("kind");
+    if (kind && isAskKind(kind)) dispatch({ type: "pick", kind });
+  }, []);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const ids = { detail: useId(), name: useId(), text: useId(), status: useId() };
   const option = ASK_OPTIONS.find((o) => o.kind === state.kind) ?? ASK_OPTIONS[0];

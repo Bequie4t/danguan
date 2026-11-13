@@ -71,7 +71,7 @@ test("복사하는 사이 글이 바뀌면 이전 글의 복사 결과를 표시
   const a = currentMessage(s);
   s = bookingReducer(s, { type: "edit", value: "가상 B 문의" });
   s = bookingReducer(s, { type: "copied", ok: true, text: a });
-  assert.equal(s.copied, "idle");
+  assert.equal(s.copied, "stale", "이전 글의 결과 대신 다시 누르라고 안내");
   s = bookingReducer(s, { type: "copied", ok: true, text: "가상 B 문의" });
   assert.equal(s.copied, "copied");
   // 방법을 전화로 바꿨다가 돌아와도 고친 글은 그대로

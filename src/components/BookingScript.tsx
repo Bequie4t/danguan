@@ -4,7 +4,7 @@
 //  - 전화로 할지 글로 할지, 처음인지, 원하는 때, 물어볼 것 → 읽기만 하면 되는 대본.
 //  - 앱이 대신 전화하거나 보내지 않는다. 병원 검색 없음. 저장·전송·로그 없음.
 //  - 로그인·기록 저장·Supabase 코드를 가져오지 않는다.
-import { useId, useReducer, useRef } from "react";
+import { useId, useReducer, useRef, useState } from "react";
 import { LOCAL_CENTER } from "@/app/help/contacts";
 import {
   ASK_ITEMS,
@@ -79,10 +79,25 @@ export default function BookingScript() {
   const sendable = canSendMessage(message);
   const sayClass = state.large ? "text-2xl leading-snug" : "text-lg leading-relaxed";
 
+  // 클립보드 쓰기는 한 번에 하나만 (겹치면 실제로 붙여넣을 글과 안내가 달라질 수 있음)
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
+
   async function copy() {
     // 복사를 시작할 때의 글. 끝났을 때 글이 그대로일 때만 결과를 보여 준다 (reducer가 비교).
     const target = message;
-    if (!canSendMessage(target)) return;
+    if (!canSendMessage(target) || copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      dispatch({ type: "copied", ok: await writeOnce(target), text: target });
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
+  }
+
+  async function writeOnce(target: string): Promise<boolean> {
     let ok = false;
     try {
       if (navigator.clipboard?.writeText) {
@@ -92,7 +107,8 @@ export default function BookingScript() {
     } catch {
       ok = false;
     }
-    if (!ok && textRef.current) {
+    // 대체 복사는 누른 글이 그대로일 때만 (기다리는 사이 고친 다른 글을 대신 복사하지 않게)
+    if (!ok && textRef.current && textRef.current.value === target) {
       textRef.current.select();
       try {
         ok = document.execCommand("copy");
@@ -100,7 +116,7 @@ export default function BookingScript() {
         ok = false;
       }
     }
-    dispatch({ type: "copied", ok, text: target });
+    return ok;
   }
 
   return (
@@ -270,16 +286,18 @@ export default function BookingScript() {
           <button
             type="button"
             onClick={() => void copy()}
-            disabled={!sendable}
+            disabled={!sendable || copying}
+            aria-busy={copying || undefined}
             aria-describedby={ids.status}
             className={`pastel-fill flex min-h-12 w-full items-center justify-center rounded-full px-5 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`}
           >
-            복사하기
+            {copying ? "복사 중…" : "복사하기"}
           </button>
           <p id={ids.status} aria-live="polite" className="min-h-6 text-sm">
             {!sendable && "보낼 글이 비어 있어요. 글을 쓰거나 ‘처음 글로’를 눌러 주세요."}
             {sendable && state.copied === "copied" && "복사했어요. 병원 문자·카카오톡·누리집 예약 칸에 붙여 넣어 직접 보내 주세요."}
             {sendable && state.copied === "failed" && "복사하지 못했어요. 글을 길게 눌러 직접 복사해 주세요."}
+            {sendable && state.copied === "stale" && "복사하는 사이 글이 바뀌었어요. 지금 글을 확인하고 다시 눌러 주세요."}
           </p>
           <p className="text-sm text-muted">글로 예약을 받는지는 병원마다 달라요. 안 되면 전화 대본으로 바꿀 수 있어요.</p>
         </section>
@@ -292,7 +310,7 @@ export default function BookingScript() {
         </h2>
         <p>예약 전화를 다른 사람에게 부탁해도 돼요.</p>
         <a
-          href="/ask"
+          href="/ask?kind=booking"
           className={`inline-flex min-h-11 items-center font-semibold underline decoration-accent decoration-2 underline-offset-4 ${focusRing}`}
         >
           예약 전화 부탁하는 문장 만들기

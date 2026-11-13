@@ -858,7 +858,7 @@ try {
       assert.equal(await page.locator('[data-worry="record"] a[href^="https://www.law.go.kr/"][target="_blank"][rel~="noopener"]').count(), 1);
       assert.ok((await page.locator("#root").innerText()).includes("2026년 11월 13일에 확인한 내용"));
       // 연결: 부탁하기·상담전화. 병원 전화 걸기·번호 입력 없음
-      assert.equal(await page.locator('main a[href="/ask"]').count(), 1);
+      assert.equal(await page.locator('main a[href="/ask?kind=booking"]').count(), 1, "예약 전화 부탁으로 바로 여는 링크");
       assert.deepEqual(await page.locator('a[href^="tel:"]').evaluateAll((els) => els.map((e) => e.getAttribute("href"))), ["tel:15770199"]);
       assert.equal(await page.locator('input[type="tel"]').count(), 0);
       const after = await page.evaluate(() => ({ ls: localStorage.length, ss: sessionStorage.length }));
@@ -905,6 +905,33 @@ try {
       await box.fill("  ");
       assert.equal(await page.getByRole("button", { name: "복사하기" }).isDisabled(), true);
       await page.getByText("보낼 글이 비어 있어요", { exact: false }).waitFor();
+    });
+
+    await scenario("예약 대본: 복사는 한 번에 하나('복사 중…'), 늦게 실패해도 고친 다른 글을 대신 복사하지 않음 / '예약 전화 부탁' 링크는 예약 전화 문장으로 열림", async () => {
+      await openBooking();
+      await page.getByRole("radio", { name: /글로/ }).check();
+      const box = page.getByRole("textbox", { name: "예약 문의 글" });
+      await page.evaluate(() => {
+        window.__clip = []; window.__exec = [];
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((res, rej) => { window.__clip.push({ t, res, rej }); }) } });
+        document.execCommand = () => { window.__exec.push(document.activeElement?.value ?? ""); return true; };
+      });
+      await page.getByRole("button", { name: "복사하기" }).click();
+      await page.getByRole("button", { name: "복사 중…" }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "복사 중…" }).isDisabled(), true);
+      await box.fill("가상 B 문의");
+      await page.evaluate(() => window.__clip[0].rej(new Error("가상 늦은 실패")));
+      await page.getByText("복사하는 사이 글이 바뀌었어요.", { exact: false }).waitFor();
+      assert.deepEqual(await page.evaluate(() => window.__exec), [], "누르지 않은 B를 대신 복사함");
+      // 링크로 연 부탁하기는 '예약 전화 대신 걸어 주기'가 골라져 있음
+      await page.goto(`${base}/?screen=ask&kind=booking`);
+      await page.getByRole("heading", { name: /할 일 하나를 건네요/ }).waitFor();
+      assert.equal(await page.getByRole("radio", { name: /예약 전화 대신 걸어 주기/ }).isChecked(), true, "예약 전화가 아닌 다른 상황으로 열림");
+      assert.match(await page.getByRole("textbox", { name: "보낼 문장" }).inputValue(), /예약 전화를 대신 걸어 줄 수 있어/);
+      // 정해지지 않은 값은 무시하고 기본 상황
+      await page.goto(`${base}/?screen=ask&kind=__proto__`);
+      await page.getByRole("heading", { name: /할 일 하나를 건네요/ }).waitFor();
+      assert.equal(await page.getByRole("radio", { name: /병원에 같이 가 주기/ }).isChecked(), true);
     });
 
     await scenario("예약 대본: 키보드로 고르기·펼치기, 초점 표시, 누르는 영역 44px", async () => {
