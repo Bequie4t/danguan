@@ -57,6 +57,9 @@ type Notice =
   | "save-unknown"
   | "clear-unknown"
   | "clear-not-done"
+  | "sync-unknown"
+  | "sync-unknown-kept"
+  | "sync-same"
   | "changed-after-save"
   | "save-cancelled"
   | "clear-cancelled"
@@ -145,6 +148,8 @@ export default function HardDayCard() {
   const recheckRef = useRef<HTMLButtonElement>(null);
   /** 지우려던 카드의 원본 (다시 확인할 때 '아직 남음'과 '다른 창이 바꿈'을 구분) */
   const clearTarget = useRef<string | null>(null);
+  /** 다시 확인 화면에 온 이유: 지우기 뒤(clear) 또는 다른 창의 변경을 읽지 못함(sync) */
+  const recheckReason = useRef<"clear" | "sync">("clear");
   /** 클립보드 쓰기는 한 번에 하나만 (겹치면 붙여넣을 값이 안내와 달라질 수 있음) */
   const [copying, setCopying] = useState(false);
   const copyingRef = useRef(false);
@@ -207,7 +212,21 @@ export default function HardDayCard() {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== STORAGE_KEY && e.key !== null) return;
       const now = readRaw(store.current); // 한 번만 읽은 값으로 판단
-      if (now === undefined) return;
+      if (now === undefined) {
+        // 다른 창의 변경 알림을 받았는데 지금 값을 읽지 못함: 이전 카드를 지금 상태처럼 두지 않는다
+        const { phase: ph0, temporary: temp0 } = live.current;
+        setConfirmRaw(null);
+        setConflict(null);
+        if (ph0 === "view" && !temp0) {
+          const focusInside = document.activeElement !== document.body;
+          showClearUnknown("sync", "sync-unknown");
+          if (focusInside) requestAnimationFrame(() => recheckRef.current?.focus());
+        } else {
+          stored.current = null; // '돌아가기'로 이전 카드를 다시 보여 주지 않게
+          setNotice("sync-unknown-kept");
+        }
+        return;
+      }
       // 충돌 미리보기에 보여 주던 카드는 편집 시작 때의 카드와 따로 비교한다
       // (처음에 카드가 없던 탭에서도, 미리보기의 카드가 지워지거나 바뀌면 미리보기·덮어쓰기 확인을 닫는다)
       const previewRaw = live.current.conflictRaw;
@@ -338,7 +357,9 @@ export default function HardDayCard() {
   }
 
   /** 지우기 뒤 지금 상태를 읽지 못함: 이전 카드를 숨기고 다시 확인하게 한다 */
-  function showClearUnknown() {
+  function showClearUnknown(reason: "clear" | "sync" = "clear", why: Notice = "clear-unknown") {
+    recheckReason.current = reason;
+    if (reason === "sync") clearTarget.current = baseRaw.current; // 보고 있던 카드
     stored.current = null;
     baseRaw.current = null;
     setSaved(null);
@@ -348,7 +369,7 @@ export default function HardDayCard() {
     setCopied(null);
     setDraft(emptyDraft());
     setPhase("unknown");
-    setNotice("clear-unknown");
+    setNotice(why);
     restoreFocus.current = () => recheckRef.current?.focus();
   }
 
@@ -356,12 +377,18 @@ export default function HardDayCard() {
   function recheck() {
     const snap = snapshot(store.current);
     if (snap.result.status === "unavailable") {
-      setNotice("clear-unknown");
+      setNotice(recheckReason.current === "sync" ? "sync-unknown" : "clear-unknown");
       requestAnimationFrame(() => (statusRef.current ?? recheckRef.current)?.focus());
       return;
     }
     // 비었으면 지운 것 → 새 카드 입력, 지우려던 그 카드면 아직 남은 것, 다른 카드면 다른 창이 바꾼 것
-    const notice: Notice = snap.raw === null ? "cleared" : snap.raw === clearTarget.current ? "clear-not-done" : "changed-elsewhere";
+    const sync = recheckReason.current === "sync";
+    const notice: Notice =
+      snap.raw === null
+        ? sync ? "removed-elsewhere" : "cleared"
+        : snap.raw === clearTarget.current
+          ? sync ? "sync-same" : "clear-not-done"
+          : "changed-elsewhere";
     applySnapshot(snap, notice);
     requestAnimationFrame(() => (snap.raw === null ? statusRef.current : titleRef.current)?.focus());
   }
@@ -492,6 +519,9 @@ export default function HardDayCard() {
     "preview-removed": "다른 창에서 미리보기의 카드를 지웠어요. 적은 내용은 그대로 있어요. 저장하면 다시 확인해요.",
     "save-unknown": "저장됐는지 확인하지 못했어요. 적은 내용은 이 화면에 남아 있어요. 화면을 닫지 말고, 잠시 뒤 ‘이 기기에 저장하기’를 다시 눌러 주세요.",
     "clear-unknown": "카드가 지워졌는지 확인하지 못했어요. 이전 카드는 화면에서 숨겼어요. 잠시 뒤 저장 상태를 다시 확인해 주세요.",
+    "sync-unknown": "다른 창에서 카드가 바뀐 것 같은데 확인하지 못했어요. 이전 카드는 화면에서 숨겼어요. 잠시 뒤 저장 상태를 다시 확인해 주세요.",
+    "sync-unknown-kept": "다른 창에서 카드가 바뀐 것 같은데 확인하지 못했어요. 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
+    "sync-same": "확인했어요. 카드는 그대로예요.",
     "clear-not-done": "카드가 아직 이 브라우저에 남아 있어요. 지우려면 ‘이 기기에서 지우기’를 다시 눌러 주세요.",
     "changed-after-save": "저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요. 적은 내용은 그대로 있고, 다시 저장하려면 확인해요.",
     "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",

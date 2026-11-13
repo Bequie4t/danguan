@@ -1802,6 +1802,49 @@ try {
       }
     });
 
+    await scenario("힘든 날 카드: 다른 탭의 삭제 알림을 받는 순간 읽기가 실패하면, 이전 카드를 숨기고 '저장 상태 다시 확인' (적는 중이면 초안 유지)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      const failNextRead = () => page.evaluate((k) => { const S = Storage.prototype; S.__gs = S.getItem; let once = true;
+        S.getItem = function (key) { if (key === k && once) { once = false; throw new Error("가상 읽기 실패"); } return S.__gs.call(this, key); }; }, HD_KEY);
+      const unarm = () => page.evaluate(() => { const S = Storage.prototype; if (S.__gs) { S.getItem = S.__gs; delete S.__gs; } });
+      try {
+        // (1) 보는 중
+        await other.goto(`${base}/?screen=hardday`);
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 카드가 바뀐 것 같은데 확인하지 못했어요. 이전 카드는", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽지 못했는데 지운 카드가 그대로 남음"); });
+        await unarm();
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "이전 카드가 보임");
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("다른 창에서 이 카드를 지웠어요.", { exact: false }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+        // (2) 적는 중: 초안 유지, '돌아가기'로 이전 카드를 다시 보여 주지 않음
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 적는 중");
+        await other.reload();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).waitFor();
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("적은 내용은 그대로 있고, 저장할 때 다시 확인해요.", { exact: false }).waitFor({ timeout: 5000 });
+        await unarm();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 적는 중");
+        assert.equal(await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).count(), 0, "이전 카드로 돌아가는 버튼이 남음");
+      } finally {
+        await unarm();
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
     await scenario("힘든 날 카드: 탭 사이 잠금을 쓸 수 없는 브라우저는 저장·지우기를 막고, 기존 카드 보기·이번에만 보기는 그대로", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       await sneakWrite("가상 잠금 없는 브라우저의 기존 카드");
