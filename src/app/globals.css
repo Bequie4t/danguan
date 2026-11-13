@@ -101,6 +101,12 @@
   --font-label: var(--font-jost), system-ui, sans-serif;
 }
 
+/* 글꼴 이름은 src/app/fonts/fonts.css의 @font-face와 같아야 한다. */
+:root {
+  --font-gothic: "Gothic A1";
+  --font-jost: "Jost";
+}
+
 html {
   -webkit-text-size-adjust: 100%;
 }
