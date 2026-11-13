@@ -53,6 +53,7 @@ type Notice =
   | "changed-elsewhere"
   | "changed-while-editing"
   | "preview-removed"
+  | "state-unknown"
   | "changed-after-save"
   | "save-cancelled"
   | "clear-cancelled"
@@ -137,6 +138,9 @@ export default function HardDayCard() {
   const restoreFocus = useRef<(() => void) | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const conflictRef = useRef<HTMLDivElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
+  /** 가장 최근 복사 요청 번호. 늦게 끝난 이전 요청은 안내를 바꾸지 않는다 */
+  const copySeq = useRef(0);
   /** 지금 보기 화면에 보이는 부탁 문장 (복사 중 바뀌었는지 확인) */
   const shownMessage = useRef("");
   const [hostname, setHostname] = useState("");
@@ -198,6 +202,9 @@ export default function HardDayCard() {
       // 충돌 미리보기에 보여 주던 카드는 편집 시작 때의 카드와 따로 비교한다
       // (처음에 카드가 없던 탭에서도, 미리보기의 카드가 지워지거나 바뀌면 미리보기·덮어쓰기 확인을 닫는다)
       const previewRaw = live.current.conflictRaw;
+      // 비교 안내가 닫힐 때 그 안에 초점이 있었다면 상태 안내로 옮긴다 (초점이 본문으로 빠지지 않게)
+      const focusWasInConflict = !!conflictRef.current?.contains(document.activeElement);
+      if (focusWasInConflict) requestAnimationFrame(() => statusRef.current?.focus());
       if (previewRaw !== undefined && now !== previewRaw) {
         setConflict(null);
         setNotice(now === null ? "preview-removed" : "changed-while-editing");
@@ -271,6 +278,16 @@ export default function HardDayCard() {
     // 결과는 잠금 안에서 읽은 값이다. 화면에 반영하기 직전에 지금 저장값을 다시 확인해, 그사이 다른 탭이 바꾼
     // (그리고 이 화면이 이미 처리했을 수 있는) 상태를 늦게 온 결과로 덮지 않는다. 적던 내용은 그대로 둔다.
     const now = readRaw(store.current);
+    if (now === undefined && r.status !== "failed") {
+      // 지금 저장 상태를 읽지 못함: 늦게 온 결과(성공 화면·이전 미리보기)를 지금 상태처럼 보여 주지 않는다. 초안은 남긴다.
+      if (r.status === "saved") baseRaw.current = r.raw; // 다시 저장하면 그때 확인한다
+      stored.current = null;
+      setConflict(null);
+      setNotice("state-unknown");
+      restoreFocus.current = () => statusRef.current?.focus();
+      setBusy(null);
+      return;
+    }
     if (r.status === "saved") {
       if (now !== undefined && now !== r.raw) {
         baseRaw.current = r.raw; // 내가 저장한 버전 기준 → 다시 저장하려면 지금 상태로 확인받는다
@@ -291,7 +308,7 @@ export default function HardDayCard() {
         restoreFocus.current = () => titleRef.current?.focus(); // 저장 버튼이 사라지므로 카드 제목으로
       }
     } else if (r.status === "conflict") {
-      const current = now === undefined ? r.currentRaw : now; // 늦게 온 결과 대신 지금 값을 보여 준다
+      const current = now as string | null; // 늦게 온 결과 대신 지금 값을 보여 준다 (읽지 못한 경우는 위에서 처리)
       if (current === expected) {
         // 그사이 원래대로 돌아옴(예: 미리보기 카드가 지워짐): 경고할 것이 없다. 다시 누르면 저장된다.
         setConflict(null);
@@ -357,6 +374,18 @@ export default function HardDayCard() {
       return;
     }
     // 지금 저장값으로 화면을 맞춘다 (지운 뒤 다른 탭이 새로 저장했으면 늦은 결과로 비우지 않고 그 카드를 보여 줌)
+    if (readRaw(store.current) === undefined) {
+      // 지운 뒤 지금 상태를 읽지 못함: 지운 카드를 다시 보여 주지 않고 알린다
+      stored.current = null;
+      setSaved(null);
+      setConfirmRaw(null);
+      setDraft(emptyDraft());
+      setPhase("edit");
+      setNotice("state-unknown");
+      restoreFocus.current = () => statusRef.current?.focus();
+      setBusy(null);
+      return;
+    }
     const snap = snapshot(store.current);
     const changedSince = r.status === "cleared" ? snap.raw !== null : snap.raw !== r.currentRaw;
     applySnapshot(snap, r.status === "cleared" ? (changedSince ? "changed-elsewhere" : "cleared") : "clear-conflict");
@@ -366,6 +395,7 @@ export default function HardDayCard() {
 
   async function copy(text: string) {
     if (!canSend(text)) return;
+    const seq = ++copySeq.current;
     let ok = false;
     try {
       if (navigator.clipboard?.writeText) {
@@ -375,6 +405,8 @@ export default function HardDayCard() {
     } catch {
       ok = false;
     }
+    // 그사이 더 최근 복사 요청이 있었으면, 이 늦은 결과로 안내를 바꾸지 않는다
+    if (seq !== copySeq.current) return;
     // 기다리는 사이 화면의 문장이 바뀌었으면(다른 탭에서 카드 변경) 대체 복사로 새 문장을 복사하지 않는다
     if (shownMessage.current !== text) {
       setCopied({ result: "stale", text: shownMessage.current });
@@ -410,6 +442,7 @@ export default function HardDayCard() {
     "changed-elsewhere": "다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.",
     "changed-while-editing": "다른 창에서 카드가 바뀌었어요. 지금 적은 내용은 그대로 있고, 저장할 때 다시 확인해요.",
     "preview-removed": "다른 창에서 미리보기의 카드를 지웠어요. 적은 내용은 그대로 있어요. 저장하면 다시 확인해요.",
+    "state-unknown": "지금 저장 상태를 확인하지 못했어요. 적은 내용은 그대로 있어요. 잠시 뒤 다시 열거나 저장해 보세요.",
     "changed-after-save": "저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요. 적은 내용은 그대로 있고, 다시 저장하려면 확인해요.",
     "save-cancelled": "저장을 취소했어요. 적은 내용은 그대로 있어요.",
     "clear-cancelled": "지우기를 취소했어요. 카드는 그대로 있어요.",
@@ -424,7 +457,7 @@ export default function HardDayCard() {
         힘든 날 카드
       </h1>
       <p className="text-muted">괜찮은 날 미리 적어 두면, 힘든 날 생각하지 않고 꺼내 쓸 수 있어요.</p>
-      <p role="status" aria-live="polite" className="min-h-6 font-semibold">
+      <p ref={statusRef} tabIndex={-1} role="status" aria-live="polite" className="min-h-6 font-semibold focus:outline-none focus-visible:outline-2">
         {notice && noticeText[notice]}
       </p>
     </div>
