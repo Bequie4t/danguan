@@ -1,26 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { Gothic_A1, Jost } from "next/font/google";
 import AccountMenu from "@/components/AccountMenu";
 import HeaderNav, { HomeLink } from "@/components/HeaderNav";
 import QuietBoundary from "@/components/QuietBoundary";
+// 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css의 --font-body).
+// 로고·영어 표제·숫자용 Jost만 저장소에 넣어 둔 파일로 직접 제공한다. 빌드할 때도, 방문할 때도
+// 구글 서버에 연결하지 않는다. 파일을 새로 받으려면: node scripts/fonts/download.mjs
+import "./fonts/fonts.css";
 import "./globals.css";
-
-// 글꼴은 빌드할 때 내려받아 이 사이트에서 직접 제공한다.
-// 그래서 방문할 때 구글 서버로 요청이 가지 않는다.
-const gothic = Gothic_A1({
-  weight: ["400", "500", "700"],
-  subsets: ["latin"],
-  display: "swap",
-  preload: false,
-  variable: "--font-gothic",
-});
-
-const jost = Jost({
-  weight: ["400", "500"],
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-jost",
-});
 
 export const metadata: Metadata = {
   title: "404 blue",
@@ -35,7 +21,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ko" className={`${gothic.variable} ${jost.variable}`}>
+    <html lang="ko">
       <body className="min-h-dvh">
         <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-surface focus:px-3 focus:py-2">
           본문으로 건너뛰기
