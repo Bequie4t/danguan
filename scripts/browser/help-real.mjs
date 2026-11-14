@@ -22,7 +22,13 @@ try {
     const outside = [];
     const scripts = [];
     page.on("pageerror", (e) => errors.push(e.message.split("\n")[0]));
-    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text().split("\n")[0]); });
+    // 시험이 일부러 보내는 가짜 요청(아래 probe)의 주소. 그 요청이 낸 404 콘솔 오류만 앱 오류에서 뺀다.
+    const probeUrls = new Set();
+    page.on("console", (m) => {
+      if (m.type() !== "error") return;
+      if (probeUrls.has(m.location().url)) return;
+      errors.push(m.text().split("\n")[0]);
+    });
     page.on("request", (r) => {
       const u = new URL(r.url());
       if (u.origin !== origin && !r.url().startsWith("data:")) outside.push(u.host);
@@ -130,10 +136,9 @@ try {
       assert.deepEqual(before, [], "저장할 때 서버로 나간 요청");
       // 정적 파일처럼 보이는 데이터 요청은 잡혀야 한다
       const fake = `${APP}/_next/static/media/probe.woff2`;
-      const errorsBeforeProbe = errors.length;
+      probeUrls.add(fake);
       await page.evaluate(async (p) => { await fetch(p, { method: "POST", body: "가상" }).catch(() => {}); }, fake);
       await page.waitForTimeout(200);
-      errors.length = errorsBeforeProbe; // 시험용 요청이 일부러 낸 404 콘솔 오류는 앱 오류 집계에서 뺀다
       page.off("request", onReq);
       assert.deepEqual(before, [`POST fetch ${fake}`], "정적 파일처럼 보이는 데이터 요청을 잡아야 함");
       await page.evaluate(() => localStorage.clear());
