@@ -21,7 +21,11 @@ export default function Home() {
             <p className="text-lg font-semibold">내 기록</p>
             <p className="mt-1 text-muted">남긴 기록을 보고 고치거나 지울 수 있어요.</p>
           </Link>
-          <a href="/ask" className="rounded border border-line bg-surface p-5 hover:border-accent sm:col-span-2">
+          <a href="/hardday" className="rounded border border-line bg-surface p-5 hover:border-accent">
+            <p className="text-lg font-semibold">힘든 날 카드</p>
+            <p className="mt-1 text-muted">괜찮은 날 먹을 것·부탁 문장을 적어 두고, 힘든 날 꺼내 써요. 이 기기에만 저장해요.</p>
+          </a>
+          <a href="/ask" className="rounded border border-line bg-surface p-5 hover:border-accent">
             <p className="text-lg font-semibold">부탁하기</p>
             <p className="mt-1 text-muted">“도와줘” 대신 할 일 하나를 건네는 문장을 만들어요. 보내는 건 내가 직접 해요.</p>
           </a>

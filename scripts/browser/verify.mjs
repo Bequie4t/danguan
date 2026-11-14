@@ -6,6 +6,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isOwnFontRequest } from "./requests.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixturePath = resolve(root, "scripts/browser/fixture.jsx");
@@ -975,6 +976,1038 @@ try {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       await page.setViewportSize(vp);
       assert.ok(overflow <= 0, `가로로 ${overflow}px 넘침`);
+    });
+
+    // ── 힘든 날 카드 (6단계): 이 기기에만 저장, 서버로 보내지 않음 ──
+    const HD_KEY = "404blue.hardday.v1";
+    const openHard = async () => {
+      await page.goto(`${base}/?screen=hardday`);
+      await page.getByRole("heading", { name: "힘든 날 카드", exact: true }).waitFor();
+    };
+    const hdStored = () => page.evaluate((k) => localStorage.getItem(k), HD_KEY);
+    const fillHard = async () => {
+      await page.getByLabel("먹을 것 1").fill("가상 동네 죽집 소고기죽");
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/order");
+      await page.getByLabel("먼저 부탁할 사람").fill("민지");
+      await page.getByRole("button", { name: "사람 더하기" }).click();
+      await page.getByLabel("그다음 사람").fill("지훈");
+    };
+
+    await scenario("힘든 날 카드: 적고 저장 → 새로 열어도 그대로 → 복사 → 고치기 → 지우기(확인)까지, 서버 요청 없음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      const requests = [];
+      // 시험 화면 파일과, 이 사이트가 직접 제공하는 글꼴(#13, Jost)을 브라우저가 글꼴로 불러온 GET만 제외
+      // (같은 출처·GET·자원 종류 font·쿼리 없는 경로, scripts/browser/requests.mjs)
+      let fontsSeen = 0;
+      const onReq = (r) => {
+        const u = r.url();
+        if (isOwnFontRequest(r, base)) { fontsSeen++; return; }
+        if (!/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(u)) requests.push(`${r.method()} ${r.resourceType()} ${u}`);
+      };
+      page.on("request", onReq);
+      await openHard();
+      assert.equal(await hdStored(), null);
+      await fillHard();
+      // 잘못된 주소면 저장 버튼이 꺼지고 이유를 보여 준다
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("javascript:alert(1)");
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.getByText("https:// 로 시작하는 주소만", { exact: false }).waitFor();
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/order");
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const stored = JSON.parse(await hdStored());
+      assert.deepEqual(stored.people, ["민지", "지훈"]);
+      assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), [HD_KEY], "정해진 키 하나만");
+      // 새로 열어도 카드가 보임 (이 기기 저장)
+      await openHard();
+      await page.getByRole("heading", { name: "먹을 것", exact: true }).waitFor();
+      const order = page.getByRole("link", { name: "주문 화면 열기 (새 창)" });
+      assert.equal(await order.getAttribute("href"), "https://example.test/order");
+      assert.equal(await order.getAttribute("target"), "_blank");
+      assert.match(await order.getAttribute("rel"), /noopener/);
+      assert.ok((await page.locator("#root").innerText()).includes("먼저 민지에게, 어렵다면 지훈에게"));
+      assert.ok((await page.locator("#root").innerText()).includes("지훈에게 같은 문장을 보내 봐요"));
+      assert.equal(await page.locator('main a[href="/help"]').count(), 1);
+      // 복사: '보냈어요'라고 하지 않음
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+      await page.getByRole("button", { name: "문장 복사하기" }).click();
+      await page.getByText("복사했어요.", { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), stored.message);
+      assert.ok(!/보냈어요|전송 완료/.test(await page.locator("#root").innerText()));
+      await context.clearPermissions();
+      // 고치기 → 돌아가기
+      await page.getByRole("button", { name: "카드 고치기" }).click();
+      assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽");
+      await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).click();
+      // 지우기: 확인을 거쳐야 지워짐, 취소하면 그대로
+      await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+      await page.getByRole("button", { name: "취소" }).click();
+      assert.notEqual(await hdStored(), null, "취소했는데 지워짐");
+      await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+      await page.getByRole("button", { name: "지우기", exact: true }).click();
+      await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor();
+      assert.equal(await hdStored(), null);
+      await openHard();
+      assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "", "지웠는데 남아 있음");
+      assert.deepEqual(requests, [], "힘든 날 카드에서 서버 요청 없음");
+      assert.ok(fontsSeen > 0, "글꼴 요청이 있었고 제외됐어야 함 (예외가 실제로 쓰였는지)");
+      // 글꼴처럼 보이는 데이터 요청은 예외에 걸리지 않고 잡혀야 한다
+      const fontPath = `${base}/_next/static/media/jost-test.woff2`;
+      await page.evaluate(async (p) => {
+        const quiet = (x) => x.catch(() => {});
+        await quiet(fetch(p, { method: "POST", body: "가상 카드 내용" })); // 같은 경로에 POST
+        await quiet(fetch(p)); // GET이지만 글꼴이 아니라 fetch
+        await quiet(fetch(`${p}?card=1`)); // 쿼리가 붙은 경로
+      }, fontPath);
+      await page.waitForTimeout(200);
+      page.off("request", onReq);
+      assert.deepEqual(
+        requests,
+        [`POST fetch ${fontPath}`, `GET fetch ${fontPath}`, `GET fetch ${fontPath}?card=1`],
+        "글꼴처럼 보이는 데이터 요청을 잡아야 함",
+      );
+    });
+
+    await scenario("힘든 날 카드: 손상된 저장값·위험한 주소는 쓰지 않고, 저장소를 못 쓰면 '이번에만 보기'", async () => {
+      await page.goto(`${base}/?screen=form`);
+      await page.evaluate((k) => localStorage.setItem(k, "{망가진"), HD_KEY);
+      await openHard();
+      await page.getByText("저장된 카드를 읽을 수 없어서", { exact: false }).waitFor();
+      await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ version: 1, foods: [{ name: "가상 위험", url: "javascript:alert(1)" }], people: [], message: "가상", savedAt: "2026-11-13T00:00:00.000Z" })), HD_KEY);
+      await openHard();
+      await page.getByText("가상 위험", { exact: true }).waitFor();
+      assert.equal(await page.locator('a[href^="javascript:"]').count(), 0, "위험한 주소가 링크가 됨");
+      assert.equal(await page.getByRole("link", { name: "주문 화면 열기 (새 창)" }).count(), 0);
+      assert.ok((await page.locator("#root").innerText()).includes("부탁할 사람이 없다면"));
+      await page.evaluate(() => localStorage.clear());
+      // 저장소를 못 쓰는 브라우저 (사생활 보호 모드 등)
+      await page.evaluate(() => { Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new Error("SecurityError"); } }); });
+      await page.evaluate(() => window.__fixture.mount("hardday"));
+      await page.getByText("이 브라우저에서는 저장할 수 없어요 (사생활", { exact: false }).waitFor();
+      await fillHard();
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).click();
+      await page.getByText("저장하지 않은 카드예요", { exact: false }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "이 기기에서 지우기" }).count(), 0);
+    });
+
+    await scenario("힘든 날 카드: 다른 탭에서 지우면 이 탭에서도 바로 사라지고, 다른 탭에서 바꾸면 저장 직전에 알리고 덮어쓰지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "카드 고치기" }).waitFor();
+        // 1) 다른 탭(other)에서 지움 → 이 탭(page)의 보기에서 이름·문장이 사라짐
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 이 카드를 지웠어요.", { exact: false }).waitFor();
+        assert.ok(!(await page.locator("#root").innerText()).includes("민지"), "지운 카드의 이름이 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null);
+        // 2) 이 탭에서 다시 저장 → 다른 탭이 고치는 중 → 이 탭에서 바꿈 → 다른 탭 저장은 충돌로 멈춤
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await other.reload();
+        await other.getByRole("button", { name: "카드 고치기" }).click();
+        await other.getByLabel("먹을 것 1").fill("가상 다른 탭 메뉴");
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먼저 부탁할 사람").fill("가상 새 이름");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await other.getByText("다른 창에서 카드가 바뀌었어요.", { exact: false }).waitFor();
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await other.getByText("다른 창에서 저장된 카드를 바꿨어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 새 이름/, "다른 탭이 확인 없이 덮어씀");
+        assert.equal(await other.getByLabel("먹을 것 1").inputValue(), "가상 다른 탭 메뉴", "충돌 때 적던 내용이 사라짐");
+        await other.getByRole("button", { name: "그래도 지금 적은 내용으로 바꾸기" }).click();
+        await other.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 다른 탭 메뉴/);
+        // 보기 중인 탭은 다른 탭의 새 내용으로 바뀜
+        await page.getByText("다른 창에서 카드를 고쳐서 새 내용으로 바꿨어요.", { exact: false }).waitFor().catch(async () => {
+          // page는 저장 뒤 보기 상태 → storage 이벤트로 새 내용 반영
+          throw new Error("보기 중인 탭에 다른 탭의 변경이 반영되지 않음");
+        });
+        await page.getByText("가상 다른 탭 메뉴", { exact: true }).waitFor();
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    // 같은 문서에서 직접 쓰면 storage 이벤트가 오지 않는다 → '이벤트를 받기 전에 바뀐' 경우를 흉내 낸다
+    const sneakWrite = (message) => page.evaluate(([k, m]) => localStorage.setItem(k, JSON.stringify({ version: 1, foods: [], people: [], message: m, savedAt: "2026-11-13T00:00:00.000Z" })), [HD_KEY, message]);
+
+    await scenario("힘든 날 카드: 지우기·덮어쓰기는 확인한 버전에만 — 확인 뒤 바뀐 카드는 지우거나 덮어쓰지 않고 다시 묻는다", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      try {
+        // 1) 지우기 확인을 연 뒤 카드가 바뀜 → 지우지 않고 바뀐 카드를 보여 줌
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await sneakWrite("가상 확인 뒤 새 카드");
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 카드가 바뀌어서 지우지 않았어요.", { exact: false }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 확인 뒤 새 카드/, "확인하지 않은 새 카드를 지움");
+        assert.ok((await page.getByRole("textbox", { name: "부탁 문장" }).inputValue()).includes("가상 확인 뒤 새 카드"), "바뀐 카드를 보여 주지 않음");
+        // 새 카드를 보고 다시 확인하면 지움
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor();
+        // 2) 덮어쓰기 확인 뒤 또 바뀜 → 다시 멈춤
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 내 고침");
+        await sneakWrite("가상 첫 변경");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 바꿨어요.", { exact: false }).waitFor();
+        await sneakWrite("가상 두 번째 변경"); // 경고를 본 뒤 또 바뀜
+        await page.getByRole("button", { name: "그래도 지금 적은 내용으로 바꾸기" }).click();
+        await page.waitForTimeout(200);
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 두 번째 변경/, "경고 뒤 또 바뀐 카드를 덮어씀");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 내 고침");
+        // 지금 버전에 대해 다시 확인하면 저장
+        await page.getByRole("button", { name: "그래도 지금 적은 내용으로 바꾸기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 내 고침/);
+      } finally {
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 처음 읽는 도중 다른 탭이 지워도, 보이는 카드 기준으로 저장을 멈춰 되살리지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await sneakWrite("가상 읽는 중 지워질 카드");
+      // 첫 읽기 직후 다른 탭이 지운 것처럼: 이 키의 첫 getItem이 값을 돌려준 뒤 바로 지운다
+      await page.evaluate((k) => {
+        const orig = Storage.prototype.getItem; let once = true;
+        Storage.prototype.__get = orig;
+        Storage.prototype.getItem = function (key) { const v = orig.call(this, key); if (key === k && once) { once = false; this.removeItem(key); } return v; };
+      }, HD_KEY);
+      try {
+        await page.evaluate(() => window.__fixture.mount("hardday"));
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽는 사이 지워진 카드를 확인 없이 다시 저장함"); });
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null);
+      } finally {
+        await page.evaluate(() => { Storage.prototype.getItem = Storage.prototype.__get; delete Storage.prototype.__get; localStorage.clear(); });
+      }
+    });
+
+    await scenario("힘든 날 카드: 다른 탭이 저장 카드를 지워도 '이번에만 보기' 카드·따로 고친 내용은 지키고, 저장하려면 다시 확인", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "카드 고치기" }).waitFor();
+        // page: 저장 카드와 다른 내용으로 '이번에만 보기'
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 따로 쓴 임시 메뉴");
+        await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).click();
+        await page.getByText("가상 따로 쓴 임시 메뉴", { exact: true }).waitFor();
+        // other: 저장 카드 지움 → page의 임시 카드는 그대로
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 화면에 따로 적은 내용은 그대로 있어요.", { exact: false }).waitFor();
+        await page.getByText("가상 따로 쓴 임시 메뉴", { exact: true }).waitFor();
+        // 임시 카드를 고쳐 저장하려 하면, 지워진 상태를 알리고 확인을 받는다 (조용히 되살리지 않음)
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null, "확인 없이 저장됨");
+        await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 따로 쓴 임시 메뉴/);
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장 카드를 고치다 취소하면 지금 저장소를 다시 읽어, 지워진 카드를 다시 보여 주지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        // (1) 고친 초안이 남아 있는 탭: 다른 탭 삭제 → '돌아가기'가 지운 카드로 가지 않음
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 고치던 메뉴");
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 화면에 따로 적은 내용은 그대로 있어요.", { exact: false }).waitFor();
+        assert.equal(await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).count(), 0, "지운 카드로 돌아가는 버튼이 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 고치던 메뉴");
+        // (2) 이벤트를 받기 전에 지워진 경우에도: 취소하면 저장소를 다시 읽음
+        await page.evaluate(() => localStorage.clear());
+        await openHard(); await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.evaluate((k) => localStorage.removeItem(k), HD_KEY); // 같은 문서라 이벤트 없음
+        await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).click();
+        await page.waitForTimeout(200);
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "지워진 카드를 다시 보여 줌");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 빈 주소 칸에 'https://'만 쓴 초안도 바뀐 것으로 보고, 다른 탭 삭제 때 지키기", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      await page.getByLabel("먹을 것 1").fill("가상 메뉴");
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://");
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 화면에 따로 적은 내용은 그대로 있어요.", { exact: false }).waitFor();
+        assert.equal(await page.getByLabel("주문할 때 여는 주소 (선택)").first().inputValue(), "https://", "입력 중인 주소가 사라짐");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 다른 탭이 잠금을 쥐고 쓰는 동안 기다렸다가 다시 비교 — 덮어쓰지 않고 지금 카드를 보여 주며 물음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "카드 고치기" }).click();
+      await page.getByLabel("먹을 것 1").fill("가상 이 탭 메뉴");
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=form`);
+        // 다른 탭: 같은 잠금을 쥔 채로 (저장 중인 것처럼)
+        await other.evaluate(() => { navigator.locks.request("404blue.hardday", () => new Promise((r) => { window.__release = r; })); });
+        await other.waitForFunction(() => typeof window.__release === "function");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "저장하는 중…" }).waitFor();
+        // 잠금 안에서 다른 탭이 새 카드를 쓰고 놓음
+        await other.evaluate((k) => { localStorage.setItem(k, JSON.stringify({ version: 1, foods: [{ name: "가상 다른 탭 메뉴", url: "" }], people: [], message: "가상", savedAt: "2026-11-13T00:00:00.000Z" })); window.__release(); }, HD_KEY);
+        await page.getByText("다른 창에서 저장된 카드를 바꿨어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 다른 탭 메뉴/, "잠금 뒤 다시 비교하지 않고 덮어씀");
+        assert.match(await page.locator("[data-conflict-preview]").innerText(), /가상 다른 탭 메뉴/, "바뀐 카드 내용을 보여 주지 않음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 이 탭 메뉴", "초안이 사라짐");
+        // 다른 탭이 잠금을 오래 쥐면: 기다리다 멈추고 알림 (저장 안 함)
+        await other.evaluate(() => { window.__release = null; navigator.locks.request("404blue.hardday", () => new Promise((r) => { window.__release = r; })); });
+        await other.waitForFunction(() => typeof window.__release === "function");
+        await page.getByRole("button", { name: "그래도 지금 적은 내용으로 바꾸기" }).click();
+        await page.getByText("다른 창에서 카드를 저장하거나 지우는 중이에요.", { exact: false }).waitFor({ timeout: 9000 });
+        assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 다른 탭 메뉴/);
+        await other.evaluate(() => window.__release());
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    // 다른 탭(other)이 잠금을 쥔 채로 둔다. 풀 때는 other.evaluate(() => window.__release())
+    const holdLock = async (other) => {
+      await other.evaluate(() => { window.__release = null; navigator.locks.request("404blue.hardday", () => new Promise((r) => { window.__release = r; })); });
+      await other.waitForFunction(() => typeof window.__release === "function");
+    };
+
+    await scenario("힘든 날 카드: 잠금을 기다리는 중 '지우기 → 취소'하면, 잠금이 풀린 뒤에도 지우지 않음 (실제 navigator.locks)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByRole("button", { name: /지우는 중/ }).waitFor();
+        await page.getByRole("button", { name: "취소" }).click();
+        await page.getByText("지우기를 취소했어요.", { exact: false }).waitFor();
+        await other.evaluate(() => window.__release());
+        await page.waitForTimeout(500);
+        assert.notEqual(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null, "취소했는데 지워짐");
+        assert.ok((await page.locator("#root").innerText()).includes("먼저 민지에게"), "카드가 화면에서 사라짐");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장 대기 중에는 입력·화면 전환이 멈추고 '저장 취소'로 철회 — 잠금이 풀려도 저장되지 않고 새 입력 유지", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const kept = await page.evaluate((k) => localStorage.getItem(k), HD_KEY);
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 A 초안");
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "저장 취소" }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").isDisabled(), true, "대기 중 입력이 막히지 않음");
+        assert.equal(await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).isDisabled(), true, "대기 중 화면 전환이 막히지 않음");
+        await page.getByRole("button", { name: "저장 취소" }).click();
+        await page.getByText("저장을 취소했어요.", { exact: false }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").isEnabled(), true);
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 A 초안");
+        await page.getByLabel("먹을 것 1").fill("가상 B 초안");
+        await other.evaluate(() => window.__release());
+        await page.waitForTimeout(500);
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), kept, "취소한 저장이 실행됨");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 B 초안", "새 입력이 사라짐");
+        // 5초 넘게 기다리면 멈추고, 입력을 그대로 이어서 고칠 수 있음
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 카드를 저장하거나 지우는 중이에요.", { exact: false }).waitFor({ timeout: 9000 });
+        assert.equal(await page.getByLabel("먹을 것 1").isEnabled(), true);
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 B 초안");
+        await other.evaluate(() => window.__release());
+        await page.waitForTimeout(300);
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), kept, "시간이 지난 저장이 늦게 실행됨");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 충돌 미리보기·덮어쓰기 확인은 다른 탭이 지우거나 바꾸면 바로 사라지고, 초안은 유지", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 내 초안");
+        await sneakWrite("가상 바뀐 카드 문장");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.locator("[data-conflict-preview]").waitFor();
+        // 다른 탭이 카드를 지움 → 미리보기·'그래도 바꾸기'가 사라짐
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 화면에 따로 적은 내용은 그대로 있어요.", { exact: false }).waitFor();
+        assert.equal(await page.locator("[data-conflict-preview]").count(), 0, "지운 카드가 미리보기에 남음");
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상 바뀐 카드 문장"), "지운 내용이 화면에 남음");
+        assert.equal(await page.getByRole("button", { name: "그래도 지금 적은 내용으로 바꾸기" }).count(), 0);
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 내 초안");
+        // 다시 저장하면 지금 상태(지워짐) 기준으로 새로 물음
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 처음에 카드가 없던 탭에서도, 미리보기의 카드가 지워지면 미리보기·덮어쓰기 확인을 닫고 초안은 남김", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); // 빈 상태
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByLabel("먹을 것 1").fill("가상 다른 탭 카드");
+        await other.getByLabel("먼저 부탁할 사람").fill("가상지운이름");
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await other.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByLabel("먹을 것 1").fill("가상 빈 탭 초안");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.locator("[data-conflict-preview]").waitFor();
+        assert.match(await page.locator("[data-conflict-preview]").innerText(), /가상지운이름/);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 미리보기의 카드를 지웠어요.", { exact: false }).waitFor();
+        assert.equal(await page.locator("[data-conflict-preview]").count(), 0, "지운 카드가 미리보기에 남음");
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상지운이름"), "지운 이름이 화면에 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 빈 탭 초안", "초안이 사라짐");
+        // 지금 상태(카드 없음)는 처음과 같으니 그대로 저장됨
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장을 기다리는 중 화면을 떠나면 철회 — 잠금이 풀려도 저장되지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      const other = await context.newPage();
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await holdLock(other);
+        await page.getByLabel("먹을 것 1").fill("가상 떠난 화면의 초안");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "저장 취소" }).waitFor();
+        // 같은 문서 안에서 다른 화면으로 (머리글 링크로 화면이 바뀌는 경우와 같음: 카드 화면이 닫힘)
+        await page.evaluate(() => window.__fixture.mount("help"));
+        await page.locator('[data-help-number="109"]').waitFor();
+        await other.evaluate(() => window.__release());
+        await page.waitForTimeout(500);
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null, "떠난 화면의 저장이 실행됨");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 키보드로 저장·지우기를 누르면 기다리는 동안 '취소'에 초점, 취소하면 원래 버튼으로 돌아옴", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      const other = await context.newPage();
+      const focused = () => page.evaluate(() => document.activeElement?.textContent?.trim());
+      try {
+        await other.goto(`${base}/?screen=form`);
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.getByRole("button", { name: "저장 취소" }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "저장 취소");
+        await page.keyboard.press("Enter");
+        await page.getByText("저장을 취소했어요.", { exact: false }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "이 기기에 저장하기").catch(async () => { throw new Error(`취소 뒤 초점이 돌아오지 않음: ${await focused()}`); });
+        await other.evaluate(() => window.__release());
+        // 지우기도 같은 방식
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await holdLock(other);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).focus();
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "취소");
+        await page.keyboard.press("Enter");
+        await page.getByText("지우기를 취소했어요.", { exact: false }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "이 기기에서 지우기").catch(async () => { throw new Error(`지우기 취소 뒤 초점이 돌아오지 않음: ${await focused()}`); });
+        await other.evaluate(() => window.__release());
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    // 잠금 안의 저장소 작업 '직후'(결과가 화면에 반영되기 전)에 다른 탭이 지운 것처럼 만든다
+    const afterLockedOp = (op) => page.evaluate(([k, op]) => {
+      const S = Storage.prototype; S.__set = S.setItem; S.__get = S.getItem; let armed = true;
+      const removeSoon = (store) => queueMicrotask(() => S.removeItem.call(store, k));
+      if (op === "set") S.setItem = function (key, v) { S.__set.call(this, key, v); if (key === k && armed) { armed = false; removeSoon(this); } };
+      else S.getItem = function (key) { const v = S.__get.call(this, key); if (key === k && armed && v !== null) { armed = false; removeSoon(this); } return v; };
+    }, [HD_KEY, op]);
+    const restoreStorage = () => page.evaluate(() => { const S = Storage.prototype; if (S.__set) { S.setItem = S.__set; delete S.__set; } if (S.__get) { S.getItem = S.__get; delete S.__get; } });
+
+    await scenario("힘든 날 카드: 저장 직후 다른 탭이 지우면, 늦게 온 '저장 성공'으로 지운 카드를 보여 주지 않고 초안은 남김", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await afterLockedOp("set");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장했지만 바로 뒤 다른 창에서 카드를 바꾸거나 지웠어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("늦게 온 저장 결과로 지운 카드를 보여 줌"); });
+        await restoreStorage();
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null);
+        assert.equal(await page.getByRole("button", { name: "카드 고치기" }).count(), 0, "지운 카드의 보기 화면이 뜸");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽", "초안이 사라짐");
+        // 다시 저장하려면 '지워졌어요' 확인
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor();
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 충돌 결과가 늦게 오는 사이 그 카드가 지워지면, 지운 카드를 미리보기로 보여 주지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 내 초안");
+        await sneakWrite("가상곧지워질문장");
+        await afterLockedOp("get"); // 잠금 안에서 '가상곧지워질문장'을 읽은 직후 지워짐
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요. 그래서 저장하지 않았어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("지운 카드 기준의 늦은 충돌 결과를 그대로 보여 줌"); });
+        await restoreStorage();
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상곧지워질문장"), "지운 카드가 미리보기에 남음");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 내 초안");
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 복사가 늦게 실패하는 사이 다른 탭이 문장을 바꾸면, 새 문장을 대신 복사하지 않고 다시 누르도록 안내", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.evaluate(() => {
+          window.__copied = [];
+          Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: () => new Promise((_, rej) => { window.__failCopy = () => rej(new Error("가상 실패")); }) } });
+          document.execCommand = (cmd) => { window.__copied.push(String(window.getSelection?.() ?? "") || document.activeElement?.value || ""); return true; };
+        });
+        await page.getByRole("button", { name: "문장 복사하기" }).click();
+        await page.waitForFunction(() => typeof window.__failCopy === "function");
+        // 다른 탭이 카드 문장을 바꿈 → 이 탭의 보기도 새 문장으로 바뀜
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "카드 고치기" }).click();
+        await other.getByLabel("부탁 문장 (선택)").fill("가상 새 부탁 문장 B");
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("가상 새 부탁 문장 B", { exact: false }).first().waitFor();
+        await page.evaluate(() => window.__failCopy());
+        await page.getByText("복사하는 사이 다른 창에서 카드 문장이 바뀌었어요.", { exact: false }).waitFor();
+        assert.deepEqual(await page.evaluate(() => window.__copied), [], "누르지 않은 새 문장을 대신 복사함");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 키보드로 저장하면 성공 뒤 카드 제목으로, 충돌이면 비교 안내로 초점이 감", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.waitForFunction(() => document.activeElement?.tagName === "H1").catch(async () => { throw new Error(`저장 뒤 초점이 제목으로 가지 않음: ${await page.evaluate(() => document.activeElement?.tagName)}`); });
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 초안");
+        await sneakWrite("가상 다른 탭 변경");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.locator("[data-conflict-preview]").waitFor();
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label")?.startsWith("다른 창의 변경")).catch(async () => { throw new Error(`충돌 뒤 초점이 비교 안내로 가지 않음: ${await page.evaluate(() => document.activeElement?.tagName)}`); });
+      } finally {
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    // 잠금 안 작업 직후 다른 탭이 지우고, 그 뒤 '지금 값 다시 읽기'만 한 번 실패하게 만든다
+    const afterLockedOpThenReadFails = (op) => page.evaluate(([k, op]) => {
+      const S = Storage.prototype; S.__set = S.setItem; S.__get = S.getItem; let armed = true; let failNext = false; let skip = 0;
+      const removeSoon = (store) => queueMicrotask(() => { S.removeItem.call(store, k); failNext = true; });
+      S.getItem = function (key) {
+        if (key === k && failNext) { failNext = false; throw new Error("가상 읽기 실패"); }
+        const v = S.__get.call(this, key);
+        if (op === "get" && key === k && armed && v !== null) { armed = false; removeSoon(this); }
+        return v;
+      };
+      if (op === "set") S.setItem = function (key, v) { S.__set.call(this, key, v); if (key === k && armed) { armed = false; removeSoon(this); } };
+    }, [HD_KEY, op]);
+
+    await scenario("힘든 날 카드: 결과를 반영하기 전 지금 저장값을 읽지 못하면, 저장 성공·이전 미리보기를 보여 주지 않고 초안만 남김", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        // (1) 저장 성공 결과 + 그 뒤 삭제 + 다시 읽기 실패
+        await afterLockedOpThenReadFails("set");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽지 못했는데 이전 결과를 지금 상태처럼 보여 줌"); });
+        await restoreStorage();
+        assert.equal(await page.getByText("이 기기에 저장했어요.", { exact: true }).count(), 0, "'저장했어요'가 뜸");
+        assert.equal(await page.getByRole("button", { name: "카드 고치기" }).count(), 0, "이전 카드의 보기 화면이 뜸");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽", "초안이 사라짐");
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), null);
+        // (2) 충돌 결과 + 그 사이 삭제 + 다시 읽기 실패
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click(); // 지워진 상태 → 충돌로 확인
+        await page.getByText("다른 창에서 저장된 카드를 지웠어요.", { exact: false }).waitFor();
+        await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 내 초안");
+        await sneakWrite("가상읽기실패때지워질문장");
+        await afterLockedOpThenReadFails("get");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 });
+        await restoreStorage();
+        assert.equal(await page.locator("[data-conflict-preview]").count(), 0, "읽지 못했는데 이전 미리보기를 보여 줌");
+        assert.ok(!(await page.locator("#root").innerText()).includes("가상읽기실패때지워질문장"), "지운 문장이 보임");
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 내 초안");
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 클립보드 쓰기는 한 번에 하나 — 진행 중에는 '복사 중…'으로 막고, 끝난 뒤 다시 눌러야 새 문장을 씀", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.evaluate(() => {
+          window.__clip = []; window.__board = null;
+          Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => new Promise((res, rej) => { window.__clip.push({ t, res: () => { window.__board = t; res(); }, rej }); }) } });
+        });
+        await page.getByRole("button", { name: "문장 복사하기" }).click(); // A (대기)
+        await page.getByRole("button", { name: "복사 중…" }).waitFor();
+        assert.equal(await page.getByRole("button", { name: "복사 중…" }).isDisabled(), true);
+        // 다른 탭이 문장을 B로 바꿔도, A가 끝나기 전에는 새 쓰기가 시작되지 않음
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "카드 고치기" }).click();
+        await other.getByLabel("부탁 문장 (선택)").fill("가상 새 부탁 문장 B");
+        await other.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("가상 새 부탁 문장 B", { exact: false }).first().waitFor();
+        await page.getByRole("button", { name: "복사 중…" }).click({ force: true }).catch(() => {});
+        assert.equal(await page.evaluate(() => window.__clip.length), 1, "진행 중에 두 번째 쓰기가 시작됨");
+        await page.evaluate(() => window.__clip[0].res()); // A가 늦게 끝남
+        await page.getByText("복사하는 사이 다른 창에서 카드 문장이 바뀌었어요.", { exact: false }).waitFor();
+        // 다시 눌러야 B를 씀 — 붙여넣을 값과 안내가 일치
+        await page.getByRole("button", { name: "문장 복사하기" }).click();
+        await page.evaluate(() => window.__clip[1].res());
+        await page.getByText("복사했어요.", { exact: false }).waitFor();
+        assert.equal(await page.evaluate(() => window.__board), "가상 새 부탁 문장 B", "안내와 실제 복사 값이 다름");
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 지우기는 됐는데 확인 읽기만 실패해도 지운 카드를 보여 주지 않음 — 못 읽으면 숨기고 '저장 상태 다시 확인'", async () => {
+      const armClearReadFails = (n) => page.evaluate(([k, n]) => {
+        const S = Storage.prototype; S.__get = S.getItem; S.__rm = S.removeItem; let fails = 0;
+        S.removeItem = function (key) { S.__rm.call(this, key); if (key === k) fails = n; };
+        S.getItem = function (key) { if (key === k && fails > 0) { fails--; throw new Error("가상 읽기 실패"); } return S.__get.call(this, key); };
+      }, [HD_KEY, n]);
+      const unarm = () => page.evaluate(() => { const S = Storage.prototype; if (S.__get) { S.getItem = S.__get; delete S.__get; } if (S.__rm) { S.removeItem = S.__rm; delete S.__rm; } });
+      const saveCardNow = async () => {
+        await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+        await openHard(); await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      };
+      try {
+        // (a) 지우기 안의 확인 읽기만 실패 → 다시 읽으니 비어 있음 → 지운 것으로 표시
+        await saveCardNow();
+        await armClearReadFails(1);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("지워졌는데 '지우지 못했어요'·이전 카드를 보여 줌"); });
+        await unarm();
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "지운 카드가 보임");
+        // (b) 다시 읽기도 실패 → 이전 카드를 숨기고 '저장 상태 다시 확인'
+        await saveCardNow();
+        await armClearReadFails(2);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("카드가 지워졌는지 확인하지 못했어요.", { exact: false }).waitFor({ timeout: 5000 });
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "이전 카드를 숨기지 않음");
+        assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).count(), 0, "저장 버튼 대신 다시 확인이어야 함");
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "저장 상태 다시 확인");
+        await unarm();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+      } finally {
+        await unarm();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 초점이 있던 비교 안내가 다른 탭의 변경으로 닫히면 상태 안내로 초점이 옮겨 감", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 초안");
+        await sneakWrite("가상 바뀐 카드");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).focus();
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label")?.startsWith("다른 창의 변경"));
+        await other.goto(`${base}/?screen=hardday`);
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.locator("[data-conflict-preview]").waitFor({ state: "detached" });
+        await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "status").catch(async () => { throw new Error(`비교 안내가 닫힌 뒤 초점이 빠짐: ${await page.evaluate(() => document.activeElement?.tagName)}`); });
+      } finally {
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    // n번째 이후의 읽기를 실패시키거나(failFrom), 쓰기 직후 읽기 k번을 실패시킨다(failAfterSet)
+    const armReads = (opts) => page.evaluate(([k, o]) => {
+      const S = Storage.prototype; S.__get = S.getItem; S.__set = S.setItem; let count = 0; let afterSet = 0;
+      S.setItem = function (key, v) { S.__set.call(this, key, v); if (key === k && o.failAfterSet) afterSet = o.failAfterSet; };
+      S.getItem = function (key) {
+        if (key === k) {
+          if (afterSet > 0) { afterSet--; throw new Error("가상 확인 읽기 실패"); }
+          count++;
+          if (o.failFrom && count >= o.failFrom) throw new Error("가상 읽기 실패");
+        }
+        return S.__get.call(this, key);
+      };
+    }, [HD_KEY, opts]);
+
+    await scenario("힘든 날 카드: '저장 상태 다시 확인'은 한 번 읽은 값으로 정하고, 못 읽으면 버튼을 그대로 둠 — 비었으면 새 카드 입력", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      try {
+        // 지운 뒤 확인을 못 해 '다시 확인' 화면으로
+        await page.evaluate((k) => { const S = Storage.prototype; S.__g0 = S.getItem; S.__r0 = S.removeItem; let fails = 0;
+          S.removeItem = function (key) { S.__r0.call(this, key); if (key === k) fails = 2; };
+          S.getItem = function (key) { if (key === k && fails > 0) { fails--; throw new Error("x"); } return S.__g0.call(this, key); }; }, HD_KEY);
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await page.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).waitFor();
+        await page.evaluate(() => { const S = Storage.prototype; S.getItem = S.__g0; S.removeItem = S.__r0; delete S.__g0; delete S.__r0; });
+        // 계속 못 읽으면 버튼이 남음
+        await armReads({ failFrom: 1 });
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.waitForTimeout(200);
+        assert.equal(await page.getByRole("button", { name: "저장 상태 다시 확인" }).count(), 1, "못 읽었는데 다시 확인 버튼이 사라짐");
+        await restoreStorage();
+        // 첫 읽기만 되고 두 번째 읽기가 실패하는 경우에도: 한 번 읽은 값으로 정하므로 새 카드 입력이 열림
+        await armReads({ failFrom: 2 });
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("이 기기에서 카드를 지웠어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("두 번 읽다가 다시 확인이 실패함"); });
+        await restoreStorage();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+        assert.equal(await page.getByText("이 브라우저에서는 저장할 수 없어요", { exact: false }).count(), 0, "저장이 꺼짐");
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 저장은 됐는데 확인 읽기만 실패하면 — 다음 읽기가 방금 쓴 값과 같으면 성공, 못 읽으면 초안 유지·다시 저장해도 자기 카드와 충돌 없음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      try {
+        await armReads({ failAfterSet: 1 });
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("저장됐는데 실패로 표시"); });
+        await restoreStorage();
+        // 확인 읽기 + 다시 읽기 모두 실패 → 저장됐는지 모름, 초안 유지
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 두 번째 저장");
+        await armReads({ failAfterSet: 2 });
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장됐는지 확인하지 못했어요.", { exact: false }).waitFor();
+        await restoreStorage();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 두 번째 저장");
+        // 다시 누르면 내가 방금 저장한 카드와 충돌하지 않고 저장됨
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("방금 내가 저장한 카드와 충돌함"); });
+      } finally {
+        await restoreStorage();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 다른 탭의 삭제 알림을 받는 순간 읽기가 실패하면, 이전 카드를 숨기고 '저장 상태 다시 확인' (적는 중이면 초안 유지)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const other = await context.newPage();
+      const failNextRead = () => page.evaluate((k) => { const S = Storage.prototype; S.__gs = S.getItem; let once = true;
+        S.getItem = function (key) { if (key === k && once) { once = false; throw new Error("가상 읽기 실패"); } return S.__gs.call(this, key); }; }, HD_KEY);
+      const unarm = () => page.evaluate(() => { const S = Storage.prototype; if (S.__gs) { S.getItem = S.__gs; delete S.__gs; } });
+      try {
+        // (1) 보는 중
+        await other.goto(`${base}/?screen=hardday`);
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("다른 창에서 카드가 바뀐 것 같은데 확인하지 못했어요. 이전 카드는", { exact: false }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽지 못했는데 지운 카드가 그대로 남음"); });
+        await unarm();
+        assert.ok(!(await page.locator("#root").innerText()).includes("먼저 민지에게"), "이전 카드가 보임");
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).click();
+        await page.getByText("다른 창에서 이 카드를 지웠어요.", { exact: false }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "");
+        // (2) 적는 중: 초안 유지, '돌아가기'로 이전 카드를 다시 보여 주지 않음
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 적는 중");
+        await other.reload();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).waitFor();
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByText("적은 내용은 그대로 있고, 저장할 때 다시 확인해요.", { exact: false }).waitFor({ timeout: 5000 });
+        await unarm();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 적는 중");
+        assert.equal(await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).count(), 0, "이전 카드로 돌아가는 버튼이 남음");
+        // (3) 편집만 열고 고치지 않은 탭: 입력칸의 이전 이름·문장을 남기지 않고 '저장 상태 다시 확인'
+        await unarm();
+        await page.getByLabel("먹을 것 1").fill("가상 동네 죽집 소고기죽");
+        await page.getByLabel("먼저 부탁할 사람").fill("민지");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText(/이 기기에 저장했어요\.|다른 창에서 저장된 카드를 지웠어요/).first().waitFor();
+        if (await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).count()) await page.getByRole("button", { name: "그래도 지금 적은 내용으로 새로 저장하기" }).click();
+        await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "카드 고치기" }).click(); // 고치지 않고 열어만 둠
+        await other.reload();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).waitFor();
+        await failNextRead();
+        await other.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        await other.getByRole("button", { name: "지우기", exact: true }).click();
+        await page.getByRole("button", { name: "저장 상태 다시 확인" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("고치지 않은 편집 화면에 지운 카드가 남음"); });
+        await unarm();
+        assert.equal(await page.getByLabel("먹을 것 1").count(), 0, "이전 이름·문장이 입력칸에 남음");
+      } finally {
+        await unarm();
+        await other.close();
+        await page.evaluate(() => localStorage.clear());
+      }
+    });
+
+    await scenario("힘든 날 카드: 탭 사이 잠금을 쓸 수 없는 브라우저는 저장·지우기를 막고, 기존 카드 보기·이번에만 보기는 그대로", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await sneakWrite("가상 잠금 없는 브라우저의 기존 카드");
+      await page.evaluate(() => { Object.defineProperty(navigator, "locks", { configurable: true, value: undefined }); });
+      await page.evaluate(() => window.__fixture.mount("hardday"));
+      await page.getByText("가상 잠금 없는 브라우저의 기존 카드", { exact: false }).first().waitFor();
+      assert.equal(await page.getByRole("button", { name: "이 기기에서 지우기" }).isDisabled(), true);
+      await page.getByText("이 사이트의 데이터만", { exact: false }).waitFor().catch(() => {});
+      const hint = await page.locator("#root").innerText();
+      assert.ok(hint.includes(new URL(base).host), "지울 사이트 주소를 보여 주지 않음");
+      assert.ok(hint.includes("‘모든 웹사이트 데이터 제거’는 누르지 마세요"));
+      assert.ok(hint.includes("서버에 저장된 계정 기록은 지워지지 않아요"));
+      await page.getByRole("button", { name: "카드 고치기" }).click();
+      await page.getByLabel("먹을 것 1").fill("가상 메뉴");
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.getByText("여러 창 사이에 안전하게 저장할 수 없어", { exact: false }).waitFor();
+      await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).click();
+      await page.getByText("저장하지 않은 카드예요.", { exact: false }).waitFor();
+      assert.match(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), /가상 잠금 없는 브라우저의 기존 카드/, "잠금 없이 저장됨");
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("힘든 날 카드: 저장 공간이 꽉 차 저장에 실패해도 입력 유지·기존 카드 유지·'이번에만 보기', 쓰기만 안 되는 브라우저도 기존 카드는 보임", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard(); await fillHard();
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const kept = await page.evaluate((k) => localStorage.getItem(k), HD_KEY);
+      // 이제부터 쓰기만 실패 (가상 용량 초과)
+      await page.evaluate(() => { Storage.prototype.__set = Storage.prototype.setItem; Storage.prototype.setItem = function () { throw new DOMException("가상 용량 초과", "QuotaExceededError"); }; });
+      try {
+        await page.getByRole("button", { name: "카드 고치기" }).click();
+        await page.getByLabel("먹을 것 1").fill("가상 새 메뉴");
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByText("저장하지 못했어요 (저장 공간 부족 등).", { exact: false }).waitFor();
+        assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 새 메뉴", "실패했는데 입력이 사라짐");
+        assert.equal(await page.evaluate((k) => localStorage.getItem(k), HD_KEY), kept, "실패한 저장이 기존 카드를 바꿈");
+        await page.getByRole("button", { name: "저장하지 않고 이번에만 보기" }).click();
+        await page.getByText("가상 새 메뉴", { exact: true }).waitFor();
+        await page.getByText("저장하지 않은 카드예요.", { exact: false }).waitFor();
+        // 처음부터 쓰기만 안 되는 경우: 기존 카드는 그대로 보여야 함 (예전에는 미리 써 보는 시험 때문에 숨겨짐)
+        await page.evaluate(() => window.__fixture.mount("hardday"));
+        await page.getByText("저장하지 않은 카드예요.", { exact: false }).waitFor({ state: "detached" });
+        await page.getByText("가상 동네 죽집 소고기죽", { exact: true }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("읽을 수 있는 기존 카드가 안 보임"); });
+        await page.getByRole("button", { name: "카드 고치기" }).waitFor();
+      } finally {
+        await page.evaluate(() => { Storage.prototype.setItem = Storage.prototype.__set; delete Storage.prototype.__set; localStorage.clear(); });
+      }
+    });
+
+    await scenario("힘든 날 카드: 적는 중 '부탁하기'는 새 탭으로 열려 적던 내용이 그대로, 한글 주문 주소는 잘리지 않음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      const korean = "https://example.test/가상매장/주문?매장=서울특별시중구가상동123번지&메뉴=소고기야채죽특&옵션=덜맵게";
+      await page.getByLabel("먹을 것 1").fill("가상 한글 주소 메뉴");
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill(korean);
+      await page.getByLabel("먼저 부탁할 사람").fill("민지");
+      const ask = page.getByRole("link", { name: /부탁하기 \(새 탭에서 열려요\)/ });
+      assert.equal(await ask.getAttribute("target"), "_blank");
+      const [popup] = await Promise.all([context.waitForEvent("page"), ask.click()]);
+      await popup.close();
+      assert.equal(new URL(page.url()).searchParams.get("screen"), "hardday", "원래 탭이 이동함");
+      assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 한글 주소 메뉴", "적던 내용이 사라짐");
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const href = await page.getByRole("link", { name: "주문 화면 열기 (새 창)" }).getAttribute("href");
+      assert.equal(decodeURI(href), korean, "주문 주소가 잘리거나 바뀜");
+      // 너무 긴 주소는 자르지 않고 저장 전에 알림
+      await page.getByRole("button", { name: "카드 고치기" }).click();
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/" + "a".repeat(2000));
+      await page.getByText("주소가 너무 길어요", { exact: false }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "이 기기에 저장하기" }).isDisabled(), true);
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("힘든 날 카드: 키보드·초점·누르는 영역 44px (적기·보기)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      const smallOf = () => page.locator("main input, main textarea, main button, main a").evaluateAll((els) => els.filter((e) => !e.readOnly).map((e) => { const r = (e.closest("label") ?? e).getBoundingClientRect(); return { t: (e.textContent || e.getAttribute("aria-label") || e.id || e.tagName).trim().slice(0, 12), h: r.height }; }).filter((x) => x.h < 44));
+      assert.deepEqual(await smallOf(), [], "적기 화면: 누르는 영역이 44px보다 작음");
+      await page.getByLabel("먹을 것 1").focus();
+      assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle), "none", "초점 표시 없음");
+      await fillHard();
+      await page.getByLabel("먹을 것 1").focus();
+      await page.keyboard.press("Enter"); // 폼 제출 = 저장
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      assert.deepEqual(await smallOf(), [], "보기 화면: 누르는 영역이 44px보다 작음");
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    for (const scheme of ["light", "dark"]) {
+      await scenario(`힘든 날 카드: ${scheme === "dark" ? "어두운" : "밝은"} 화면 글씨 대비 4.5:1 이상 (적기·보기)`, async () => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+        await openHard();
+        await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("http://example.test");
+        const lowEdit = (await helpContrast(askSel + ", main legend, main strong")).filter((x) => x.ratio < 4.5);
+        await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("");
+        await fillHard();
+        await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+        await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
+        const lowView = (await helpContrast(askSel + ", main strong")).filter((x) => x.ratio < 4.5);
+        await page.evaluate(() => localStorage.clear());
+        await page.emulateMedia({ colorScheme: "light" });
+        assert.deepEqual([...lowEdit, ...lowView], [], "글씨 대비 4.5:1 미만");
+      });
+    }
+
+    await scenario("힘든 날 카드: 200% 확대(폭 절반)에서 가로로 넘치지 않음 (긴 이름·주소)", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: Math.floor(vp.width / 2), height: vp.height });
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openHard();
+      await page.getByLabel("먹을 것 1").fill("가".repeat(30));
+      await page.getByLabel("주문할 때 여는 주소 (선택)").first().fill("https://example.test/" + "a".repeat(200));
+      await page.getByLabel("먼저 부탁할 사람").fill("나".repeat(20));
+      const o1 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      const o2 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await page.evaluate(() => localStorage.clear());
+      await page.setViewportSize(vp);
+      assert.ok(o1 <= 0 && o2 <= 0, `가로로 넘침: 적기 ${o1}px, 보기 ${o2}px`);
     });
 
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {

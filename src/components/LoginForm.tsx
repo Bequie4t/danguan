@@ -12,7 +12,7 @@ export default function LoginForm({ next, signedOut, linkError }: { next: string
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: "info" | "warn"; text: string } | null>(
     signedOut
-      ? { tone: "info", text: "로그아웃했어요. 이 기기에 표시되던 기록은 지웠어요." }
+      ? { tone: "info", text: "로그아웃했어요. 계정 기록 화면을 닫았어요. 이 브라우저에 저장한 힘든 날 카드는 남아 있어요." }
       : linkError
         ? { tone: "warn", text: "확인 링크가 만료되었거나 이미 사용되었어요. 다시 로그인해 주세요." }
         : null,

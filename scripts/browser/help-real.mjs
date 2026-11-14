@@ -1,8 +1,9 @@
-// 실제 앱 전체 화면(공통 머리글 포함)에서 도움 화면·부탁하기·예약 대본을 연다. 모의 부품이 아닌 next start 결과를 본다.
+// 실제 앱 전체 화면(공통 머리글 포함)에서 도움 화면·부탁하기·예약 대본·힘든 날 카드를 연다. 모의 부품이 아닌 next start 결과를 본다.
 // 사용: node scripts/browser/help-real.mjs <앱 주소> <모드 이름>   (scripts/browser/help-real.sh가 실행)
 // 확인: 오류 화면 없음, 번호·도움 버튼·연락처 파일, 로그인 코드가 인증을 시작하지 않음(외부 요청 0건).
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { isOwnStaticRequest } from "./requests.mjs";
 
 const [APP, MODE = "?"] = process.argv.slice(2);
 if (!APP) { console.error("앱 주소가 필요합니다"); process.exit(2); }
@@ -107,6 +108,43 @@ try {
     } catch (e) {
       failed++;
       console.log(`FAIL ${name} 예약 대본 - ${String(e.message).split("\n")[0]}`);
+    }
+    // 힘든 날 카드(/hardday)도 로그인 없이, 설정이 잘못돼도 쓸 수 있고 서버로 보내지 않아야 한다
+    errors.length = 0; outside.length = 0;
+    try {
+      const res = await page.goto(`${APP}/hardday`);
+      assert.equal(res.status(), 200, "힘든 날 카드 응답");
+      await page.getByLabel("먹을 것 1").waitFor({ timeout: 10000 });
+      await page.waitForTimeout(1500);
+      const body = await page.locator("body").innerText();
+      assert.ok(!/Application error|client-side exception|This page couldn/i.test(body), "오류 화면");
+      assert.ok(await page.getByRole("link", { name: "도움이 필요해요" }).isVisible(), "머리글 도움 버튼");
+      // 이 사이트의 정적 파일(글꼴·스크립트·스타일)을 그 종류로 불러온 GET만 제외 (scripts/browser/requests.mjs)
+      const before = [];
+      const onReq = (r) => { if (!isOwnStaticRequest(r, APP)) before.push(`${r.method()} ${r.resourceType()} ${r.url()}`); };
+      page.on("request", onReq);
+      await page.getByLabel("먹을 것 1").fill("가상 죽");
+      await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
+      await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
+      await page.waitForTimeout(500);
+      assert.deepEqual(before, [], "저장할 때 서버로 나간 요청");
+      // 정적 파일처럼 보이는 데이터 요청은 잡혀야 한다
+      const fake = `${APP}/_next/static/media/probe.woff2`;
+      const errorsBeforeProbe = errors.length;
+      await page.evaluate(async (p) => { await fetch(p, { method: "POST", body: "가상" }).catch(() => {}); }, fake);
+      await page.waitForTimeout(200);
+      errors.length = errorsBeforeProbe; // 시험용 요청이 일부러 낸 404 콘솔 오류는 앱 오류 집계에서 뺀다
+      page.off("request", onReq);
+      assert.deepEqual(before, [`POST fetch ${fake}`], "정적 파일처럼 보이는 데이터 요청을 잡아야 함");
+      await page.evaluate(() => localStorage.clear());
+      assert.deepEqual([...new Set(outside)], [], "힘든 날 카드에서 외부로 나간 요청");
+      const real = errors.filter((e) => !/^Failed to load resource/.test(e));
+      assert.deepEqual(real, [], `브라우저 오류: ${real.join(" | ")}`);
+      const res2 = errors.length - real.length;
+      console.log(`PASS ${name} 힘든 날 카드 실제 전체 화면${res2 ? ` (자원 불러오기 실패 ${res2}건: 기존 계정 메뉴 문제)` : ""}`);
+    } catch (e) {
+      failed++;
+      console.log(`FAIL ${name} 힘든 날 카드 - ${String(e.message).split("\n")[0]}`);
     }
     await ctx.close();
   }
