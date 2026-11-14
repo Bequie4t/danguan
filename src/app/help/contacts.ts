@@ -62,7 +62,7 @@ export const CONTACTS: HelpContact[] = [
     detail: "지금 안전하지 않을 때 (경찰 긴급신고)",
     sources: [
       {
-        label: "행정안전부 안전예방정책실 주요업무 (긴급신고 119·112·110 통합 운영)",
+        label: "행정안전부 긴급신고 통합체계 (112 범죄 신고)",
         url: "https://www.mois.go.kr/frt/sub/a06/b10/mainBusiness/screen.do",
       },
     ],
