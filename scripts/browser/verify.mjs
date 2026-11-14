@@ -1040,8 +1040,24 @@ try {
       assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "가상 동네 죽집 소고기죽");
       await page.getByRole("button", { name: "고치지 않고 카드로 돌아가기" }).click();
       // 지우기: 확인을 거쳐야 지워짐, 취소하면 그대로
-      await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
-      await page.getByRole("button", { name: "취소" }).click();
+      // 키보드로 열면 초점이 확인 영역의 '취소'로 가고(사라지는 버튼에 남지 않음), 취소하면 '이 기기에서 지우기'로 돌아온다
+      const focusInfo = () =>
+        page.evaluate(() => {
+          const el = document.activeElement;
+          const group = el?.closest('[role="group"]');
+          const labelId = group?.getAttribute("aria-labelledby");
+          return {
+            text: el?.textContent?.trim() ?? null,
+            group: labelId ? document.getElementById(labelId)?.textContent?.trim() ?? null : null,
+          };
+        });
+      await page.getByRole("button", { name: "이 기기에서 지우기" }).focus();
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "취소");
+      assert.deepEqual(await focusInfo(), { text: "취소", group: "이 기기에서 카드를 지울까요? 지우면 되돌릴 수 없어요." }, "확인을 열면 초점이 '취소'로");
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "이 기기에서 지우기");
+      assert.equal((await focusInfo()).text, "이 기기에서 지우기", "취소하면 초점이 지우기 버튼으로");
       assert.notEqual(await hdStored(), null, "취소했는데 지워짐");
       await page.getByRole("button", { name: "이 기기에서 지우기" }).click();
       await page.getByRole("button", { name: "지우기", exact: true }).click();
