@@ -3,6 +3,7 @@
 // 확인: 오류 화면 없음, 번호·도움 버튼·연락처 파일, 로그인 코드가 인증을 시작하지 않음(외부 요청 0건).
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { isOwnStaticRequest } from "./requests.mjs";
 
 const [APP, MODE = "?"] = process.argv.slice(2);
 if (!APP) { console.error("앱 주소가 필요합니다"); process.exit(2); }
@@ -118,13 +119,23 @@ try {
       const body = await page.locator("body").innerText();
       assert.ok(!/Application error|client-side exception|This page couldn/i.test(body), "오류 화면");
       assert.ok(await page.getByRole("link", { name: "도움이 필요해요" }).isVisible(), "머리글 도움 버튼");
+      // 이 사이트의 정적 파일(글꼴·스크립트·스타일)을 그 종류로 불러온 GET만 제외 (scripts/browser/requests.mjs)
       const before = [];
-      page.on("request", (r) => before.push(r.url()));
+      const onReq = (r) => { if (!isOwnStaticRequest(r, APP)) before.push(`${r.method()} ${r.resourceType()} ${r.url()}`); };
+      page.on("request", onReq);
       await page.getByLabel("먹을 것 1").fill("가상 죽");
       await page.getByRole("button", { name: "이 기기에 저장하기" }).click();
       await page.getByText("이 기기에 저장했어요.", { exact: true }).waitFor();
       await page.waitForTimeout(500);
-      assert.deepEqual(before.filter((u) => !u.includes("/_next/")), [], "저장할 때 서버로 나간 요청");
+      assert.deepEqual(before, [], "저장할 때 서버로 나간 요청");
+      // 정적 파일처럼 보이는 데이터 요청은 잡혀야 한다
+      const fake = `${APP}/_next/static/media/probe.woff2`;
+      const errorsBeforeProbe = errors.length;
+      await page.evaluate(async (p) => { await fetch(p, { method: "POST", body: "가상" }).catch(() => {}); }, fake);
+      await page.waitForTimeout(200);
+      errors.length = errorsBeforeProbe; // 시험용 요청이 일부러 낸 404 콘솔 오류는 앱 오류 집계에서 뺀다
+      page.off("request", onReq);
+      assert.deepEqual(before, [`POST fetch ${fake}`], "정적 파일처럼 보이는 데이터 요청을 잡아야 함");
       await page.evaluate(() => localStorage.clear());
       assert.deepEqual([...new Set(outside)], [], "힘든 날 카드에서 외부로 나간 요청");
       const real = errors.filter((e) => !/^Failed to load resource/.test(e));

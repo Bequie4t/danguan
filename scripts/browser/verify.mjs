@@ -6,6 +6,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isOwnFontRequest } from "./requests.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixturePath = resolve(root, "scripts/browser/fixture.jsx");
@@ -995,11 +996,13 @@ try {
     await scenario("힘든 날 카드: 적고 저장 → 새로 열어도 그대로 → 복사 → 고치기 → 지우기(확인)까지, 서버 요청 없음", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       const requests = [];
-      // 시험 화면 파일과, 이 사이트가 직접 제공하는 글꼴 파일(#13, Jost woff2)은 기록 전송이 아니므로 제외
+      // 시험 화면 파일과, 이 사이트가 직접 제공하는 글꼴(#13, Jost)을 브라우저가 글꼴로 불러온 GET만 제외
+      // (같은 출처·GET·자원 종류 font·쿼리 없는 경로, scripts/browser/requests.mjs)
+      let fontsSeen = 0;
       const onReq = (r) => {
         const u = r.url();
-        const ownFont = u.startsWith(`${base}/_next/static/media/`) && u.endsWith(".woff2");
-        if (!ownFont && !/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(u)) requests.push(u);
+        if (isOwnFontRequest(r, base)) { fontsSeen++; return; }
+        if (!/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(u)) requests.push(`${r.method()} ${r.resourceType()} ${u}`);
       };
       page.on("request", onReq);
       await openHard();
@@ -1046,8 +1049,23 @@ try {
       assert.equal(await hdStored(), null);
       await openHard();
       assert.equal(await page.getByLabel("먹을 것 1").inputValue(), "", "지웠는데 남아 있음");
-      page.off("request", onReq);
       assert.deepEqual(requests, [], "힘든 날 카드에서 서버 요청 없음");
+      assert.ok(fontsSeen > 0, "글꼴 요청이 있었고 제외됐어야 함 (예외가 실제로 쓰였는지)");
+      // 글꼴처럼 보이는 데이터 요청은 예외에 걸리지 않고 잡혀야 한다
+      const fontPath = `${base}/_next/static/media/jost-test.woff2`;
+      await page.evaluate(async (p) => {
+        const quiet = (x) => x.catch(() => {});
+        await quiet(fetch(p, { method: "POST", body: "가상 카드 내용" })); // 같은 경로에 POST
+        await quiet(fetch(p)); // GET이지만 글꼴이 아니라 fetch
+        await quiet(fetch(`${p}?card=1`)); // 쿼리가 붙은 경로
+      }, fontPath);
+      await page.waitForTimeout(200);
+      page.off("request", onReq);
+      assert.deepEqual(
+        requests,
+        [`POST fetch ${fontPath}`, `GET fetch ${fontPath}`, `GET fetch ${fontPath}?card=1`],
+        "글꼴처럼 보이는 데이터 요청을 잡아야 함",
+      );
     });
 
     await scenario("힘든 날 카드: 손상된 저장값·위험한 주소는 쓰지 않고, 저장소를 못 쓰면 '이번에만 보기'", async () => {
