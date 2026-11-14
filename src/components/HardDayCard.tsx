@@ -891,7 +891,12 @@ export default function HardDayCard() {
             disabled={!lockable || busy !== null}
             aria-describedby={!lockable ? `${uid}-nolock` : undefined}
             ref={deleteOpenRef}
-            onClick={() => setConfirmRaw(baseRaw.current)}
+            onClick={() => {
+              setConfirmRaw(baseRaw.current);
+              // 이 버튼이 사라지므로 초점을 확인 영역의 '취소'로 옮긴다. 화면 낭독기는 묶음 이름(지울까요? 질문)과 함께 읽고,
+              // 실수로 바로 지우지 않도록 되돌리기 쉬운 쪽에 둔다. 취소하면 이 버튼으로 돌아온다.
+              requestAnimationFrame(() => cancelClearRef.current?.focus());
+            }}
             className={`min-h-11 rounded-full border border-line px-4 text-sm disabled:cursor-not-allowed disabled:opacity-60 ${focusRing}`}
           >
             이 기기에서 지우기
