@@ -995,7 +995,12 @@ try {
     await scenario("힘든 날 카드: 적고 저장 → 새로 열어도 그대로 → 복사 → 고치기 → 지우기(확인)까지, 서버 요청 없음", async () => {
       await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
       const requests = [];
-      const onReq = (r) => { if (!/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(r.url())) requests.push(r.url()); };
+      // 시험 화면 파일과, 이 사이트가 직접 제공하는 글꼴 파일(#13, Jost woff2)은 기록 전송이 아니므로 제외
+      const onReq = (r) => {
+        const u = r.url();
+        const ownFont = u.startsWith(`${base}/_next/static/media/`) && u.endsWith(".woff2");
+        if (!ownFont && !/\/(fixture\.js|style\.css)|\?screen=hardday$/.test(u)) requests.push(u);
+      };
       page.on("request", onReq);
       await openHard();
       assert.equal(await hdStored(), null);
