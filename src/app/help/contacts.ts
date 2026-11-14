@@ -38,7 +38,7 @@ export const CONTACTS: HelpContact[] = [
     name: "정신건강위기상담전화",
     number: "1577-0199",
     tel: "15770199",
-    detail: "24시간 정신건강 상담전화예요.",
+    detail: "정신건강전문요원 등이 상담해요. 밤과 공휴일에는 광역정신건강복지센터로 연결된다고 안내돼 있어요.",
     sources: [
       { label: "보건복지부 보건복지상담센터 「자살예방상담전화 109」(정신건강상담전화 안내 포함)", url: "https://www.129.go.kr/109" },
       {
@@ -52,7 +52,7 @@ export const CONTACTS: HelpContact[] = [
     number: "119",
     tel: "119",
     detail: "다쳤거나 몸이 위급할 때 (구급·구조)",
-    sources: [{ label: "소방청 「119 신고 방법」", url: "https://www.nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration/" }],
+    sources: [{ label: "소방청 「119 구급신고 요령」", url: "https://www.nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration/" }],
   },
   {
     name: "경찰 긴급신고",
