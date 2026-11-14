@@ -86,10 +86,10 @@ try {
       await page.getByLabel("받는 사람 이름 (선택)").fill("민지");
       assert.match(await page.getByRole("textbox", { name: "보낼 문장" }).inputValue(), /^민지야, 오늘 밥 좀/);
       assert.deepEqual([...new Set(outside)], [], "부탁하기에서 외부로 나간 요청");
-      const real = errors.filter((e) => !/^Failed to load resource/.test(e));
-      assert.deepEqual(real, [], `브라우저 오류: ${real.join(" | ")}`);
-      const res2 = errors.length - real.length;
-      console.log(`PASS ${name} 부탁하기 실제 전체 화면${res2 ? ` (자원 불러오기 실패 ${res2}건: 기존 계정 메뉴 문제)` : ""}`);
+      // 자원 불러오기 실패(404·500 등)도 오류로 센다. 예전에는 계정 메뉴의 로그인 화면 미리 불러오기가 설정 주소 형식 오류 때
+      // 500을 내 일괄 허용했지만, 그 원인(src/lib/supabase/env.ts)을 고쳐 더는 허용하지 않는다.
+      assert.deepEqual(errors, [], `브라우저 오류: ${errors.join(" | ")}`);
+      console.log(`PASS ${name} 부탁하기 실제 전체 화면`);
     } catch (e) {
       failed++;
       console.log(`FAIL ${name} 부탁하기 - ${String(e.message).split("\n")[0]}`);
@@ -107,10 +107,10 @@ try {
       await page.getByLabel("원하는 때 (선택)").fill("내일 오전");
       assert.ok((await page.locator("ol").innerText()).includes("내일 오전에 예약할 수 있을까요?"));
       assert.deepEqual([...new Set(outside)], [], "예약 대본에서 외부로 나간 요청");
-      const real = errors.filter((e) => !/^Failed to load resource/.test(e));
-      assert.deepEqual(real, [], `브라우저 오류: ${real.join(" | ")}`);
-      const res2 = errors.length - real.length;
-      console.log(`PASS ${name} 예약 대본 실제 전체 화면${res2 ? ` (자원 불러오기 실패 ${res2}건: 기존 계정 메뉴 문제)` : ""}`);
+      // 자원 불러오기 실패(404·500 등)도 오류로 센다. 예전에는 계정 메뉴의 로그인 화면 미리 불러오기가 설정 주소 형식 오류 때
+      // 500을 내 일괄 허용했지만, 그 원인(src/lib/supabase/env.ts)을 고쳐 더는 허용하지 않는다.
+      assert.deepEqual(errors, [], `브라우저 오류: ${errors.join(" | ")}`);
+      console.log(`PASS ${name} 예약 대본 실제 전체 화면`);
     } catch (e) {
       failed++;
       console.log(`FAIL ${name} 예약 대본 - ${String(e.message).split("\n")[0]}`);
@@ -143,10 +143,10 @@ try {
       assert.deepEqual(before, [`POST fetch ${fake}`], "정적 파일처럼 보이는 데이터 요청을 잡아야 함");
       await page.evaluate(() => localStorage.clear());
       assert.deepEqual([...new Set(outside)], [], "힘든 날 카드에서 외부로 나간 요청");
-      const real = errors.filter((e) => !/^Failed to load resource/.test(e));
-      assert.deepEqual(real, [], `브라우저 오류: ${real.join(" | ")}`);
-      const res2 = errors.length - real.length;
-      console.log(`PASS ${name} 힘든 날 카드 실제 전체 화면${res2 ? ` (자원 불러오기 실패 ${res2}건: 기존 계정 메뉴 문제)` : ""}`);
+      // 자원 불러오기 실패(404·500 등)도 오류로 센다. 예전에는 계정 메뉴의 로그인 화면 미리 불러오기가 설정 주소 형식 오류 때
+      // 500을 내 일괄 허용했지만, 그 원인(src/lib/supabase/env.ts)을 고쳐 더는 허용하지 않는다.
+      assert.deepEqual(errors, [], `브라우저 오류: ${errors.join(" | ")}`);
+      console.log(`PASS ${name} 힘든 날 카드 실제 전체 화면`);
     } catch (e) {
       failed++;
       console.log(`FAIL ${name} 힘든 날 카드 - ${String(e.message).split("\n")[0]}`);
