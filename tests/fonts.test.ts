@@ -86,11 +86,23 @@ const WOFF2 = Buffer.concat([Buffer.from("wOF2", "latin1"), Buffer.alloc(200, 1)
 // 모의 서버가 돌려줄 라이선스: 저장소의 Jost OFL 전문
 const OFL = readFileSync(join(FONTS, "licenses", "jost-OFL.txt"), "utf8");
 const OFL_INTRO_ONLY = "This Font Software is licensed under the SIL Open Font License, Version 1.1.";
+// 조항 제목만 있고 본문은 없는 응답 (검토에서 덮어쓰기가 재현된 경우)
+const OFL_HEADINGS_ONLY = "SIL OPEN FONT LICENSE\nVersion 1.1\nPREAMBLE\nDEFINITIONS\nPERMISSION & CONDITIONS\nTERMINATION\nDISCLAIMER\n";
+// 끝 한 줄만 다른 전문
+const OFL_ALTERED = OFL.replace(/DISCLAIMER[\s\S]*$/, "DISCLAIMER\nTHE FONT SOFTWARE IS PROVIDED.\n");
 
 /** 모의 글꼴 서버. weights: CSS에 넣을 굵기, range: 글자 범위, fail: 실패시킬 경로 앞부분 */
-async function mockServer(opts: { weights: readonly string[]; range?: string; fail?: string; license?: string }) {
-  const server = createServer((req, res) => {
+async function mockServer(opts: {
+  weights: readonly string[];
+  range?: string;
+  fail?: string;
+  license?: string;
+  /** CSS 응답을 늦춰, 첫 실행이 진행 중인 상태를 만든다 */
+  cssDelayMs?: number;
+}) {
+  const server = createServer(async (req, res) => {
     const url = req.url ?? "";
+    if (opts.cssDelayMs && url.startsWith("/css2")) await new Promise((r) => setTimeout(r, opts.cssDelayMs));
     if (opts.fail && url.startsWith(opts.fail)) return res.writeHead(500).end();
     if (url.startsWith("/css2")) {
       const { port } = server.address() as AddressInfo;
@@ -151,7 +163,9 @@ for (const [name, opts, why] of [
   ["서버 오류(라이선스)", { weights: ["400", "500"], fail: "/indestructible-type" }, /500 http/],
   ["500 굵기가 빠진 정상 응답", { weights: ["400"] }, /Jost 500 굵기가 없음/],
   ["숫자가 빠진 글자 범위", { weights: ["400", "500"], range: "U+0041-005A, U+0061-007A" }, /없는 글자: 0123456789/],
-  ["라이선스 소개 문장 한 줄뿐인 응답", { weights: ["400", "500"], license: OFL_INTRO_ONLY }, /라이선스 전문이 아님/],
+  ["라이선스 소개 문장 한 줄뿐인 응답", { weights: ["400", "500"], license: OFL_INTRO_ONLY }, /라이선스 원문이 검증해 둔 것과 달라요/],
+  ["라이선스 조항 제목만 있는 응답", { weights: ["400", "500"], license: OFL_HEADINGS_ONLY }, /라이선스 원문이 검증해 둔 것과 달라요/],
+  ["끝부분이 다른 라이선스", { weights: ["400", "500"], license: OFL_ALTERED }, /라이선스 원문이 검증해 둔 것과 달라요/],
 ] as const) {
   test(`다운로드: ${name}이면 실패하고 기존 파일을 그대로 둔다`, async () => {
     const box = sandbox();
@@ -188,37 +202,48 @@ test("다운로드: 교체 도중 멈춰 백업만 남았으면 다음 실행이
   }
 });
 
-test("다운로드: 다른 실행이 진행 중이면 시작하지 않고, 그 실행의 임시 폴더도 건드리지 않는다", async () => {
-  const box = sandbox();
-  const srv = await mockServer({ weights: ["400", "500"] });
-  try {
-    const before = snapshot(box.out);
-    // 살아 있는 다른 실행을 흉내: 잠금 파일에 지금 살아 있는 프로세스(이 시험) 번호, 진행 중인 임시 폴더
-    writeFileSync(join(box.dir, ".fonts.lock"), String(process.pid));
-    mkdirSync(join(box.dir, ".fonts-new-other"));
-    const r = await run(box.out, srv.origin);
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, new RegExp(`다른 실행\\(프로세스 ${process.pid}\\)이 진행 중`));
-    assert.deepEqual(snapshot(box.out), before);
-    assert.deepEqual(readdirSync(box.dir).sort(), [".fonts-new-other", ".fonts.lock", "fonts"]);
-    assert.equal(readFileSync(join(box.dir, ".fonts.lock"), "utf8"), String(process.pid));
-  } finally {
-    srv.close();
-    box.cleanup();
+test("다운로드: 잠금 파일이 있으면 시작하지 않고, 잠금과 다른 실행의 임시 폴더를 건드리지 않는다", async () => {
+  // 내용이 있는 잠금(진행 중이거나 강제 종료로 남은 것), 빈 잠금(번호를 쓰기 전에 멈춘 것) 모두
+  for (const content of [String(process.pid), "99999999", ""]) {
+    const box = sandbox();
+    const srv = await mockServer({ weights: ["400", "500"] });
+    try {
+      const before = snapshot(box.out);
+      writeFileSync(join(box.dir, ".fonts.lock"), content);
+      mkdirSync(join(box.dir, ".fonts-new-other"));
+      const r = await run(box.out, srv.origin);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /다른 실행이 진행 중이거나, 지난 실행이 남긴 잠금이 있어요/);
+      assert.match(r.stderr, /rm .*\.fonts\.lock/);
+      assert.deepEqual(snapshot(box.out), before);
+      assert.deepEqual(readdirSync(box.dir).sort(), [".fonts-new-other", ".fonts.lock", "fonts"]);
+      assert.equal(readFileSync(join(box.dir, ".fonts.lock"), "utf8"), content);
+    } finally {
+      srv.close();
+      box.cleanup();
+    }
   }
 });
 
-test("다운로드: 강제 종료로 남은 잠금(이미 끝난 프로세스)은 치우고 진행한다", async () => {
+test("다운로드: 실제로 두 번 동시에 실행하면 하나만 진행하고, 진행 중인 쪽의 임시 폴더는 그대로다", async () => {
   const box = sandbox();
-  const srv = await mockServer({ weights: ["400", "500"] });
+  const srv = await mockServer({ weights: ["400", "500"], cssDelayMs: 1500 });
   try {
-    // 끝난 프로세스 번호를 얻기: 바로 끝나는 자식 프로세스
-    const dead = await new Promise<number>((resolve) => {
-      const c = spawn(process.execPath, ["-e", ""]);
-      c.on("close", () => resolve(c.pid!));
-    });
-    writeFileSync(join(box.dir, ".fonts.lock"), String(dead));
-    const r = await run(box.out, srv.origin);
+    const first = run(box.out, srv.origin);
+    // 첫 실행이 잠금과 임시 폴더를 만들 때까지 기다린다 (CSS 응답이 늦어 그 상태에 머문다)
+    const deadline = Date.now() + 10_000;
+    while (!(existsSync(join(box.dir, ".fonts.lock")) && readdirSync(box.dir).some((n) => n.startsWith(".fonts-new-")))) {
+      assert.ok(Date.now() < deadline, "첫 실행이 시작되지 않음");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const tmpOfFirst = readdirSync(box.dir).filter((n) => n.startsWith(".fonts-new-"));
+    const second = await run(box.out, srv.origin);
+    assert.equal(second.status, 1);
+    assert.match(second.stderr, /다른 실행이 진행 중이거나/);
+    // 두 번째 실행이 끝난 시점에도 첫 실행의 임시 폴더와 잠금은 그대로
+    assert.deepEqual(readdirSync(box.dir).filter((n) => n.startsWith(".fonts-new-")), tmpOfFirst);
+    assert.ok(existsSync(join(box.dir, ".fonts.lock")));
+    const r = await first;
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(box.dir), ["fonts"]);
   } finally {

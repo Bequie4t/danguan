@@ -14,8 +14,9 @@
 //   그 사이에 강제 종료되어 src/app/fonts가 없고 fonts.old-* 백업만 남았다면,
 //   다음 실행이 백업을 자동으로 되돌리고 멈춘다. 손으로 되돌리려면: mv src/app/fonts.old-<번호> src/app/fonts
 // - 어떤 경우든 git으로도 되돌릴 수 있다: git checkout -- src/app/fonts
-// - 동시에 두 번 실행하면 나중 실행은 시작하지 않는다 (잠금 파일 src/app/.fonts.lock, 강제 종료로 남은 잠금은 자동 정리).
-// - 라이선스는 SIL OFL 1.1 전문(정의·조건·종료·면책 조항)이 받아졌을 때만 인정한다.
+// - 동시에 두 번 실행하면 나중 실행은 시작하지 않는다 (잠금 파일 src/app/.fonts.lock).
+//   강제 종료로 잠금이 남으면 자동으로 지우지 않는다. 다른 실행이 없는지 확인한 뒤 손으로 지운다.
+// - 라이선스는 사람이 확인해 둔 전문과 내용이 똑같을 때만 인정한다 (SHA-256 비교).
 //
 // 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css). 여기에 글꼴을 더할 때는 먼저 제작자 원본 라이선스에
 // 예약 글꼴 이름(Reserved Font Name)이 있는지 확인한다. 웹용으로 나눈 조각은 수정본으로 볼 수 있다.
@@ -43,6 +44,9 @@ const FONTS = [
     css: `${CSS_ORIGIN}/css2?family=Jost:wght@400;500&display=swap`,
     // 제작자 원본 라이선스 (예약 글꼴 이름 없음)
     license: `${LICENSE_ORIGIN}/indestructible-type/Jost/master/OFL.txt`,
+    // 사람이 확인한 라이선스 전문(2026-11-13, src/app/fonts/licenses/jost-OFL.txt)의 SHA-256.
+    // 받은 원문이 한 글자라도 다르면 멈춘다. 일부만 오거나 내용이 바뀐 응답으로 덮어쓰지 않기 위해서다.
+    licenseSha256: "3cc70947dfb71a1afa639b26efa7939e792c9dbf32652332aab57c356697f77b",
     // 굵기마다 반드시 들어 있어야 하는 글자: 로고(404 blue)·영어 표제·전화번호
     weights: ["400", "500"],
     mustCover: "0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
@@ -136,7 +140,12 @@ async function build(tmp) {
       );
     }
     const license = await get(font.license, "text");
-    if (!isFullOfl(license)) throw new Error(`라이선스 전문이 아님: ${font.license}`);
+    if (sha256(license) !== font.licenseSha256) {
+      throw new Error(
+        `라이선스 원문이 검증해 둔 것과 달라요: ${font.license}. ` +
+          `사람이 새 원문을 확인한 뒤 이 스크립트의 licenseSha256을 바꿔 주세요 (받은 값 ${sha256(license)}).`,
+      );
+    }
     await writeFile(path.join(licenses, `${font.slug}-OFL.txt`), license);
     console.log(`${font.family}: @font-face ${faces.length}개`);
   }
@@ -163,47 +172,32 @@ async function recover() {
   return true;
 }
 
-/**
- * SIL OFL 1.1 전문인지: 소개 문장 한 줄이 아니라 머리말·정의·허락과 조건·종료·면책 조항 제목이 모두 있어야 한다.
- * (제목 표기는 배포처마다 대소문자·밑줄이 달라 대소문자를 가리지 않는다)
- */
-function isFullOfl(text) {
-  const t = text.toUpperCase().replace(/\s+/g, " "); // 줄바꿈으로 나뉜 문구도 찾는다
-  return (
-    t.includes("SIL OPEN FONT LICENSE") &&
-    t.includes("VERSION 1.1") &&
-    ["PREAMBLE", "DEFINITIONS", "PERMISSION & CONDITIONS", "TERMINATION", "DISCLAIMER"].every((h) => t.includes(h))
-  );
-}
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 
 // 동시에 두 번 실행되지 않게 잠금 파일을 둔다. 다른 실행의 임시 폴더를 지우지 않기 위해서다.
+// 이 스크립트는 남의 잠금을 절대 지우지 않는다 (지우는 순간 두 실행이 함께 진행할 수 있다).
+// 강제 종료로 잠금이 남았다면, 다른 실행이 없는지 확인한 뒤 사람이 지운다.
 const LOCK = path.join(PARENT, `.${BASE}.lock`);
 
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === "EPERM"; // 다른 사용자 프로세스는 살아 있음
-  }
-};
-
-/** 잠금을 얻으면 풀기 함수를, 다른 실행이 살아 있으면 예외를 돌려준다. 죽은 실행의 잠금은 치운다. */
+/** 잠금을 만들면 풀기 함수를 돌려준다. 이미 있으면 아무것도 건드리지 않고 예외. */
 async function lock() {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fh = await open(LOCK, "wx");
-      await fh.writeFile(String(process.pid));
-      await fh.close();
-      return () => rm(LOCK, { force: true });
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-      const pid = Number((await readFile(LOCK, "utf8").catch(() => "")).trim());
-      if (pid && alive(pid)) throw new Error(`다른 실행(프로세스 ${pid})이 진행 중이에요. 끝난 뒤 다시 실행해 주세요.`);
-      await rm(LOCK, { force: true }); // 강제 종료된 실행이 남긴 잠금
-    }
+  let fh;
+  try {
+    fh = await open(LOCK, "wx"); // 없을 때만 만든다 (원자적)
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    const owner = (await readFile(LOCK, "utf8").catch(() => "")).trim();
+    throw new Error(
+      `다른 실행이 진행 중이거나, 지난 실행이 남긴 잠금이 있어요 (${path.relative(ROOT, LOCK)}${owner ? `, 프로세스 ${owner}` : ""}). ` +
+        `다른 실행이 없는지 확인한 뒤 이 파일을 지우고 다시 실행해 주세요: rm ${path.relative(ROOT, LOCK)}`,
+    );
   }
-  throw new Error(`잠금 파일을 만들 수 없어요: ${LOCK}`);
+  try {
+    await fh.writeFile(String(process.pid)); // 사람이 볼 안내용. 잠금 판단에는 쓰지 않는다
+  } finally {
+    await fh.close();
+  }
+  return () => rm(LOCK, { force: true }); // 내가 만든 잠금만 푼다
 }
 
 async function main() {
