@@ -71,6 +71,14 @@ test("Jost 400·500이 있다", () => {
   assert.ok(weights.has("400") && weights.has("500"));
 });
 
+test("저장소의 라이선스 원문과 다운로드 스크립트의 검증 기준값(SHA-256)이 같다 (같은 커밋에서 함께 갱신)", () => {
+  const text = readFileSync(join(FONTS, "licenses", "jost-OFL.txt"));
+  assert.ok(!text.includes(0x0d), "줄바꿈이 CRLF로 바뀌었어요 (.gitattributes의 eol=lf 확인)");
+  const script = readFileSync(join(ROOT, "scripts", "fonts", "download.mjs"), "utf8");
+  const expected = script.match(/licenseSha256:\s*"([0-9a-f]{64})"/)?.[1];
+  assert.equal(createHash("sha256").update(text).digest("hex"), expected);
+});
+
 test("Jost 사용 허락서(SIL OFL 1.1, 예약 글꼴 이름 없음)가 함께 있다", () => {
   const text = readFileSync(join(FONTS, "licenses", "jost-OFL.txt"), "utf8");
   assert.match(text, /SIL Open Font License, Version 1\.1/);
