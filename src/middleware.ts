@@ -50,6 +50,6 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // 도움 화면(/help)·부탁하기(/ask)와 정적 파일은 로그인·세션 처리를 거치지 않는다 (둘 다 저장 없이 동작).
-  matcher: ["/((?!help|ask|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
+  // 도움 화면(/help)·부탁하기(/ask)·예약 대본(/booking)과 정적 파일은 로그인·세션 처리를 거치지 않는다 (모두 저장 없이 동작).
+  matcher: ["/((?!help|ask|booking|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
 };

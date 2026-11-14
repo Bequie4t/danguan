@@ -33,9 +33,11 @@ export default function Home() {
           <h2 id="explore" className="text-lg font-semibold">내 마음 알아보기</h2>
           <span aria-hidden="true" className="h-px flex-1 bg-line" />
         </div>
-        <p className="rounded border border-dashed border-line p-5 text-muted">
-          진료처 찾기와 진료 준비는 다음 단계에서 열려요.
-        </p>
+        <a href="/booking" className="block rounded border border-line bg-surface p-5 hover:border-accent">
+          <p className="text-lg font-semibold">병원 예약 대본</p>
+          <p className="mt-1 text-muted">예약 전화에서 할 말을 순서대로 만들어요. 비용·진료 기록 걱정도 함께 풀어 봐요.</p>
+        </a>
+        <p className="rounded border border-dashed border-line p-5 text-muted">진료 준비(한 장 요약)는 다음 단계에서 열려요.</p>
       </section>
 
       <Link href="/help" className="block rounded bg-help-soft p-5 text-help">
