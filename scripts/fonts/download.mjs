@@ -14,11 +14,14 @@
 //   그 사이에 강제 종료되어 src/app/fonts가 없고 fonts.old-* 백업만 남았다면,
 //   다음 실행이 백업을 자동으로 되돌리고 멈춘다. 손으로 되돌리려면: mv src/app/fonts.old-<번호> src/app/fonts
 // - 어떤 경우든 git으로도 되돌릴 수 있다: git checkout -- src/app/fonts
+// - 동시에 두 번 실행하면 나중 실행은 시작하지 않는다 (잠금 파일 src/app/.fonts.lock).
+//   강제 종료로 잠금이 남으면 자동으로 지우지 않는다. 다른 실행이 없는지 확인한 뒤 손으로 지운다.
+// - 라이선스는 사람이 확인해 둔 전문과 내용이 똑같을 때만 인정한다 (SHA-256 비교).
 //
 // 한글 본문은 기기 기본 글꼴을 쓴다 (globals.css). 여기에 글꼴을 더할 때는 먼저 제작자 원본 라이선스에
 // 예약 글꼴 이름(Reserved Font Name)이 있는지 확인한다. 웹용으로 나눈 조각은 수정본으로 볼 수 있다.
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,6 +44,9 @@ const FONTS = [
     css: `${CSS_ORIGIN}/css2?family=Jost:wght@400;500&display=swap`,
     // 제작자 원본 라이선스 (예약 글꼴 이름 없음)
     license: `${LICENSE_ORIGIN}/indestructible-type/Jost/master/OFL.txt`,
+    // 사람이 확인한 라이선스 전문(2026-11-13, src/app/fonts/licenses/jost-OFL.txt)의 SHA-256.
+    // 받은 원문이 한 글자라도 다르면 멈춘다. 일부만 오거나 내용이 바뀐 응답으로 덮어쓰지 않기 위해서다.
+    licenseSha256: "3cc70947dfb71a1afa639b26efa7939e792c9dbf32652332aab57c356697f77b",
     // 굵기마다 반드시 들어 있어야 하는 글자: 로고(404 blue)·영어 표제·전화번호
     weights: ["400", "500"],
     mustCover: "0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
@@ -134,7 +140,12 @@ async function build(tmp) {
       );
     }
     const license = await get(font.license, "text");
-    if (!license.includes("SIL Open Font License")) throw new Error(`라이선스 원문이 아님: ${font.license}`);
+    if (sha256(license) !== font.licenseSha256) {
+      throw new Error(
+        `라이선스 원문이 검증해 둔 것과 달라요: ${font.license}. ` +
+          `사람이 새 원문을 확인한 뒤 이 스크립트의 licenseSha256을 바꿔 주세요 (받은 값 ${sha256(license)}).`,
+      );
+    }
     await writeFile(path.join(licenses, `${font.slug}-OFL.txt`), license);
     console.log(`${font.family}: @font-face ${faces.length}개`);
   }
@@ -161,10 +172,48 @@ async function recover() {
   return true;
 }
 
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+
+// 동시에 두 번 실행되지 않게 잠금 파일을 둔다. 다른 실행의 임시 폴더를 지우지 않기 위해서다.
+// 이 스크립트는 남의 잠금을 절대 지우지 않는다 (지우는 순간 두 실행이 함께 진행할 수 있다).
+// 강제 종료로 잠금이 남았다면, 다른 실행이 없는지 확인한 뒤 사람이 지운다.
+const LOCK = path.join(PARENT, `.${BASE}.lock`);
+
+/** 잠금을 만들면 풀기 함수를 돌려준다. 이미 있으면 아무것도 건드리지 않고 예외. */
+async function lock() {
+  let fh;
+  try {
+    fh = await open(LOCK, "wx"); // 없을 때만 만든다 (원자적)
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    const owner = (await readFile(LOCK, "utf8").catch(() => "")).trim();
+    throw new Error(
+      `다른 실행이 진행 중이거나, 지난 실행이 남긴 잠금이 있어요 (${path.relative(ROOT, LOCK)}${owner ? `, 프로세스 ${owner}` : ""}). ` +
+        `다른 실행이 없는지 확인한 뒤 이 파일을 지우고 다시 실행해 주세요: rm ${path.relative(ROOT, LOCK)}`,
+    );
+  }
+  try {
+    await fh.writeFile(String(process.pid)); // 사람이 볼 안내용. 잠금 판단에는 쓰지 않는다
+  } finally {
+    await fh.close();
+  }
+  return () => rm(LOCK, { force: true }); // 내가 만든 잠금만 푼다
+}
+
 async function main() {
+  const unlock = await lock();
+  try {
+    await run();
+  } finally {
+    await unlock();
+  }
+}
+
+async function run() {
   if (await recover()) {
     console.error(`지난 실행이 교체 도중 멈춰, 백업을 ${BASE}로 되돌렸어요. 다시 실행해 주세요.`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   // 같은 디스크 안에 임시 폴더를 만들어야 rename으로 한 번에 바꿀 수 있다.
   const tmp = await mkdtemp(path.join(PARENT, `.${BASE}-new-`));
@@ -188,7 +237,7 @@ async function main() {
   } catch (err) {
     await rm(tmp, { recursive: true, force: true });
     console.error(`실패 — 기존 글꼴 파일은 바꾸지 않았어요: ${err.message}`);
-    process.exit(1);
+    process.exitCode = 1; // process.exit()는 잠금 풀기(finally)를 건너뛰므로 쓰지 않는다
   }
 }
 
