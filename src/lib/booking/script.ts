@@ -188,7 +188,7 @@ export interface Worry {
   sources: WorrySource[];
 }
 
-export const WORRIES_CHECKED_ON = "2026-11-13";
+export const WORRIES_CHECKED_ON = "2026-11-15";
 
 export const WORRIES: ReadonlyArray<Worry> = [
   {
@@ -222,6 +222,15 @@ export const WORRIES: ReadonlyArray<Worry> = [
       "새 보험에 가입할 때는 보험사가 청약서처럼 글(서면)로 묻는 중요한 사항, 예를 들어 최근 진료 이력에 사실대로 답해야 해요. 일부러, 또는 크게 주의하지 않아 사실과 다르게 답하면 계약이 해지될 수 있어요.",
       "무엇을 묻는지는 보험사와 상품마다 달라요. 걱정되면 가입 전에 질문 내용을 미리 확인해 보세요.",
     ],
-    sources: [{ label: "상법 제651조·제651조의2(고지의무) — 국가법령정보센터", url: "https://www.law.go.kr/법령/상법" }],
+    sources: [
+      {
+        label: "상법 제651조(고지의무위반으로 인한 계약해지) — 국가법령정보센터",
+        url: "https://www.law.go.kr/lsLinkProc.do?joNo=065100&lsClsCd=L&lsNm=%EC%83%81%EB%B2%95&mode=11",
+      },
+      {
+        label: "상법 제651조의2(서면에 의한 질문의 효력) — 국가법령정보센터",
+        url: "https://www.law.go.kr/lsLinkProc.do?joNo=065102&lsClsCd=L&lsNm=%EC%83%81%EB%B2%95&mode=11",
+      },
+    ],
   },
 ];
