@@ -4,7 +4,7 @@
 // - 출시 전과 정기적으로 사람이 다시 확인한다. 바꿀 때는 docs/help-sources.md 도 함께 고친다.
 // - 이 파일은 Supabase·기록 코드를 import 하지 않는다 (도움 화면은 로그인·저장과 독립).
 
-export const HELP_CHECKED_ON = "2026-10-08";
+export const HELP_CHECKED_ON = "2026-11-15";
 
 export interface HelpSource {
   label: string;
@@ -31,14 +31,16 @@ export const CONTACTS: HelpContact[] = [
         url: "https://www.mohw.go.kr/board.es?mid=a10503010100&bid=0027&act=view&list_no=1479607&tag=&nPage=1",
       },
       { label: "한국생명존중희망재단", url: "https://www.kfsp.or.kr/" },
+      { label: "보건복지부 보건복지상담센터 「자살예방상담전화 109」", url: "https://www.129.go.kr/109" },
     ],
   },
   {
     name: "정신건강위기상담전화",
     number: "1577-0199",
     tel: "15770199",
-    detail: "정신건강전문요원 등이 상담해요. 밤과 공휴일에는 광역정신건강복지센터로 연결된다고 안내돼 있어요.",
+    detail: "24시간 정신건강 상담전화예요.",
     sources: [
+      { label: "보건복지부 보건복지상담센터 「자살예방상담전화 109」(정신건강상담전화 안내 포함)", url: "https://www.129.go.kr/109" },
       {
         label: "보건복지부 「정신건강복지센터 및 정신건강상담전화 운영」",
         url: "https://www.mohw.go.kr/menu.es?mid=a10706040100",
