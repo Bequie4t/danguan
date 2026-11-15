@@ -4,7 +4,7 @@
 // - 출시 전과 정기적으로 사람이 다시 확인한다. 바꿀 때는 docs/help-sources.md 도 함께 고친다.
 // - 이 파일은 Supabase·기록 코드를 import 하지 않는다 (도움 화면은 로그인·저장과 독립).
 
-export const HELP_CHECKED_ON = "2026-10-08";
+export const HELP_CHECKED_ON = "2026-11-15";
 
 export interface HelpSource {
   label: string;
@@ -31,14 +31,17 @@ export const CONTACTS: HelpContact[] = [
         url: "https://www.mohw.go.kr/board.es?mid=a10503010100&bid=0027&act=view&list_no=1479607&tag=&nPage=1",
       },
       { label: "한국생명존중희망재단", url: "https://www.kfsp.or.kr/" },
+      { label: "보건복지부 보건복지상담센터 「자살예방상담전화 109」", url: "https://www.129.go.kr/109" },
     ],
   },
   {
     name: "정신건강위기상담전화",
     number: "1577-0199",
     tel: "15770199",
-    detail: "정신건강전문요원 등이 상담해요. 밤과 공휴일에는 광역정신건강복지센터로 연결된다고 안내돼 있어요.",
+    detail:
+      "정신건강전문요원 등이 상담해요. 휴대전화로 걸면 가까운 정신건강복지센터로, 밤과 공휴일에는 광역정신건강복지센터로 연결된다고 안내돼 있어요.",
     sources: [
+      { label: "보건복지부 보건복지상담센터 「자살예방상담전화 109」(정신건강상담전화 안내 포함)", url: "https://www.129.go.kr/109" },
       {
         label: "보건복지부 「정신건강복지센터 및 정신건강상담전화 운영」",
         url: "https://www.mohw.go.kr/menu.es?mid=a10706040100",
@@ -50,14 +53,19 @@ export const CONTACTS: HelpContact[] = [
     number: "119",
     tel: "119",
     detail: "다쳤거나 몸이 위급할 때 (구급·구조)",
-    sources: [{ label: "소방청 「119 신고 방법」", url: "https://www.nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration/" }],
+    sources: [{ label: "소방청 「119 구급신고 요령」", url: "https://www.nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration/" }],
   },
   {
     name: "경찰 긴급신고",
     number: "112",
     tel: "112",
     detail: "지금 안전하지 않을 때 (경찰 긴급신고)",
-    sources: [{ label: "경찰청", url: "https://www.police.go.kr/" }],
+    sources: [
+      {
+        label: "행정안전부 긴급신고 통합체계 (112 범죄 신고)",
+        url: "https://www.mois.go.kr/frt/sub/a06/b10/mainBusiness/screen.do",
+      },
+    ],
   },
 ];
 

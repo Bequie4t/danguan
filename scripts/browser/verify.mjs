@@ -546,7 +546,7 @@ try {
       assert.ok(cards[0].top < cards[1].top, "109가 맨 위가 아님");
       assert.equal(await page.locator('a[href="/help/contact-card"][download]').count(), 1, "연락처 저장 링크");
       const text = await page.locator("#root").innerText();
-      assert.ok(text.includes("2026년 10월 8일에 공식 기관 누리집을 기준으로 확인"), "확인 날짜");
+      assert.ok(text.includes("2026년 11월 15일에 공식 기관 누리집을 기준으로 확인"), "확인 날짜");
       assert.ok(text.includes("안전을 보장하지 않아요"));
       assert.ok((await page.locator('a[target="_blank"][rel~="noopener"]').count()) >= 6, "출처 링크");
       assert.equal(await page.locator('svg[role="img"]').count(), 0, "도움 화면에 울이·그림 없음");
