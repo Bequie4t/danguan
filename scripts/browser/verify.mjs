@@ -857,7 +857,12 @@ try {
       // 걱정 풀기: 펼치면 근거 링크
       await page.locator('[data-worry="record"] summary').click();
       assert.equal(await page.locator('[data-worry="record"] a[href^="https://www.law.go.kr/"][target="_blank"][rel~="noopener"]').count(), 1);
-      assert.ok((await page.locator("#root").innerText()).includes("2026년 11월 13일에 확인한 내용"));
+      // 보험 근거는 법 전체가 아니라 제651조·제651조의2 조문으로 바로 연결
+      assert.deepEqual(
+        await page.locator('[data-worry="insurance"] a[href^="https://www.law.go.kr/lsLinkProc.do"]').evaluateAll((as) => as.map((a) => new URL(a.href).searchParams.get("joNo"))),
+        ["065100", "065102"],
+      );
+      assert.ok((await page.locator("#root").innerText()).includes("2026년 11월 15일에 확인한 내용"));
       // 연결: 부탁하기·상담전화. 병원 전화 걸기·번호 입력 없음
       assert.equal(await page.locator('main a[href="/ask?kind=booking"]').count(), 1, "예약 전화 부탁으로 바로 여는 링크");
       assert.deepEqual(await page.locator('a[href^="tel:"]').evaluateAll((els) => els.map((e) => e.getAttribute("href"))), ["tel:15770199"]);
