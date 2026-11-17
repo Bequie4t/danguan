@@ -341,6 +341,55 @@ await step("9c. 오늘 기록 저장 중·저장 실패 직후에도 머리글 '
   }
 });
 
+await step("9d. 진료 메모(/visit): 로그인 없으면 로그인 화면으로, B 기록만 기간 안에서 세고, 조회만(GET) 보냄, 캐시 안 함", page, async () => {
+  // 로그인 없는 새 창
+  const anon = await browser.newContext({ locale: "ko-KR", timezoneId: "Asia/Seoul" });
+  await anon.route("**/*", (route) => (isLocal(route.request().url()) ? route.fallback() : route.abort("blockedbyclient")));
+  const ap = await anon.newPage();
+  await ap.goto(`${APP}/visit`);
+  await ap.waitForURL(/\/login\?next=%2Fvisit|\/login\?next=\/visit/);
+  await anon.close();
+  // B로 가상 기록 두 건 더 (3일 전 돌아보며, 40일 전)
+  const b = createClient(SB, ANON, { auth: { persistSession: false } });
+  const { error: se } = await b.auth.signInWithPassword(B);
+  ok(!se, `B 로그인 실패: ${se?.message}`);
+  const ago = (d) => new Date(Date.now() - d * 86400000).toISOString();
+  for (const [d, burden, source, tags] of [[3, "heavy", "recall", ["sleep"]], [40, "very_heavy", "recall", []]]) {
+    const r = await b.rpc("create_checkin", { p_id: crypto.randomUUID(), p_occurred_at: ago(d), p_occurred_tz: "Asia/Seoul", p_recorded_at: new Date().toISOString(), p_recorded_tz: "Asia/Seoul", p_source: source, p_burden: burden, p_tags: tags, p_note: null });
+    ok(!r.error, `B 기록 생성 실패: ${r.error?.message}`);
+  }
+  const sent = [];
+  const onReq = (r) => { if (r.url().startsWith(new URL(SB).origin + "/rest/")) sent.push(`${r.method()} ${new URL(r.url()).pathname}`); };
+  page.on("request", onReq);
+  const res = await page.goto(`${APP}/visit`);
+  ok(/no-store/.test(res.headers()["cache-control"] ?? ""), `캐시 헤더: ${res.headers()["cache-control"]}`);
+  await page.getByRole("heading", { name: "진료 준비 메모", exact: true }).waitFor();
+  const memo = page.locator("article");
+  await memo.getByText(/^기록이 없는 날 \d+일$/).waitFor();
+  const t = (await memo.textContent()).replace(/\s+/g, " ");
+  ok(t.includes("기간 28일 중 기록한 날 2일, 기록 2개"), `세기가 다름: ${t.slice(0, 200)}`);
+  ok(t.includes("지금 기록 1개 · 돌아보며 기록 1개"), "출처 구분이 다름");
+  ok(!(await page.locator("body").innerText()).includes("가상 다른 탭 메모"), "A 기록 메모가 보임");
+  await page.getByRole("checkbox", { name: /가상 B 기록 e2e/ }).check();
+  await page.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가상 e2e 불편함");
+  ok((await memo.textContent()).includes("가상 B 기록 e2e") && (await memo.textContent()).includes("가상 e2e 불편함"), "메모에 반영 안 됨");
+  await page.screenshot({ path: `${SHOTS}/visit-light.png`, fullPage: true });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.screenshot({ path: `${SHOTS}/visit-dark.png`, fullPage: true });
+  await page.emulateMedia({ colorScheme: "dark", media: "print" });
+  await page.screenshot({ path: `${SHOTS}/visit-print.png`, fullPage: true });
+  await page.emulateMedia({ colorScheme: "light", media: "screen" });
+  page.off("request", onReq);
+  ok(sent.length > 0 && sent.every((x) => x === "GET /rest/v1/checkins"), `보낸 요청: ${sent.join(", ")}`);
+  // 떠나기 전 확인 (쓴 글이 있음) — 확인창이 뜨면 머무르기
+  let asked = false;
+  page.once("dialog", (d) => { asked = d.type() === "beforeunload"; void d.dismiss(); });
+  await page.locator("header").getByRole("link", { name: "내 기록" }).click();
+  await page.waitForTimeout(1000);
+  ok(asked, "쓴 글이 있는데 떠나기 전 확인이 없음");
+  ok(page.url().endsWith("/visit"), "머무르기를 골랐는데 화면이 바뀜");
+});
+
 await step("10. 로컬 밖으로 나간 요청 없음", null, async () => {
   ok(blocked.length === 0, `막은 외부 요청: ${[...new Set(blocked)].join(", ")}`);
 });

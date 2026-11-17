@@ -12,6 +12,7 @@ import HeaderNav from "../../src/components/HeaderNav";
 import AskPage from "../../src/app/ask/page";
 import BookingPage from "../../src/app/booking/page";
 import HardDayPage from "../../src/app/hardday/page";
+import VisitMemo from "../../src/components/VisitMemo";
 
 const A = "00000000-0000-4000-8000-00000000000a";
 const B = "00000000-0000-4000-8000-00000000000b";
@@ -61,13 +62,13 @@ export const fixture = {
   putRow(row) { rows.set(row.id, { ...row }); },
   /** 다른 탭에서 메모·생활 항목을 더한 것처럼 고친다 (version 증가, 시험 전용) */
   editElsewhere(id, patch) { const r = rows.get(id); if (r) rows.set(id, { ...r, ...patch, version: r.version + 1 }); },
-  /** 다른 곳에서 남긴 가상 기록을 더한다 (경험 시점 지정) */
-  addRecord(uid, suffix, burden, occurredAt) {
+  /** 다른 곳에서 남긴 가상 기록을 더한다 (경험 시점 지정, extra로 태그·메모·출처) */
+  addRecord(uid, suffix, burden, occurredAt, extra = {}) {
     const id = `00000000-0000-4000-9000-${suffix}`;
     rows.set(id, {
       id, owner_id: uid, occurred_at: occurredAt, occurred_tz: "Asia/Seoul",
       recorded_at: occurredAt, recorded_tz: "Asia/Seoul", source: "direct",
-      burden, tags: [], note: null, created_at: now, updated_at: now, version: 1,
+      burden, tags: [], note: null, created_at: now, updated_at: now, version: 1, ...extra,
     });
     return id;
   },
@@ -86,7 +87,7 @@ export const fixture = {
     if (screen === "booking") { root.render(<React.Fragment key={++screenGeneration}><BookingPage /></React.Fragment>); return; }
     // 힘든 날 카드: 로그인·저장(서버)과 무관, 이 기기 저장소만
     if (screen === "hardday") { root.render(<React.Fragment key={++screenGeneration}><HardDayPage /></React.Fragment>); return; }
-    root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
+    root.render(<AuthScope><Probe /><React.Fragment key={++screenGeneration}>{screen === "records" ? <RecordList /> : screen === "visit" ? <VisitMemo /> : screen === "consent" ? <ConsentForm next="/consent-done" /> : <CheckinForm />}</React.Fragment></AuthScope>);
   },
   async runStale() {
     return this.staleRun((client) => client.rpc("create_checkin", {
@@ -135,16 +136,21 @@ function clientFor(uid) {
     },
     from(table) {
       let byId = null;
+      let range = null;
       const query = {
         select() { return query; }, is() { return query; }, order() { return query; },
+        gte(column, value) { range = { ...range, gte: value }; return query; },
+        lt(column, value) { range = { ...range, lt: value }; return query; },
         eq(column, value) { if (table === "checkins" && column === "id") byId = value; return query; },
         async limit() {
-          const operation = byId ? "checkins_by_id" : table;
-          calls.push({ operation, uid, id: byId ?? undefined });
-          const data = table === "consents" ? (consents.get(uid) !== false ? [{ id: "fake-consent" }] : []) : [...rows.values()].filter((r) => r.owner_id === uid && (!byId || r.id === byId)).map((r) => ({ ...r }));
+          const operation = byId ? "checkins_by_id" : range ? "checkins_range" : table;
+          calls.push({ operation, uid, id: byId ?? undefined, range: range ?? undefined });
+          const inRange = (r) => !range || (r.occurred_at >= range.gte && r.occurred_at < range.lt);
+          const data = table === "consents" ? (consents.get(uid) !== false ? [{ id: "fake-consent" }] : []) : [...rows.values()].filter((r) => r.owner_id === uid && (!byId || r.id === byId) && inRange(r)).map((r) => ({ ...r }));
           await waitGate(operation);
           if (table === "consents" && fixture.failure === "consent_query_error") return { data: null, error: { message: "fake consent query failure" } };
           if (operation === "checkins" && fixture.failure === "list_error") { fixture.failure = null; return { data: null, error: { message: "fake list failure" } }; }
+          if (operation === "checkins_range" && fixture.failure === "range_error") { fixture.failure = null; return { data: null, error: { message: "fake range failure" } }; }
           return { data, error: null };
         },
         async insert() {

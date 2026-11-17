@@ -149,3 +149,23 @@ body {
     animation: none !important;
   }
 }
+
+/* 인쇄(진료 메모): 어두운 테마여도 흰 종이에 짙은 글씨로 */
+@media print {
+  :root {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --fg: #1d2028;
+    --muted: #4a505c;
+    --line: #c9ced8;
+    --accent: #2f7fa8;
+    --accent-fg: #ffffff;
+    --brand: #2f7fa8;
+    --help-strong: #3a4150;
+    --help-strong-fg: #ffffff;
+    color-scheme: light;
+  }
+  header.sticky {
+    position: static;
+  }
+}

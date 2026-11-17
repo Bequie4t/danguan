@@ -66,6 +66,9 @@ export default function RecordList() {
         <div>
           <h1 className="text-2xl font-bold">내 기록</h1>
           <p className="text-muted">최근 200개까지 보여요. 이 계정으로 로그인한 나만 볼 수 있어요.</p>
+          <a href="/visit" className="mt-1 inline-block text-accent underline underline-offset-4">
+            기간별로 모아 진료 메모 만들기
+          </a>
         </div>
         <button
           type="button"

@@ -171,6 +171,55 @@ export async function listCheckins(client: RecordsClient, limit = 200): Promise<
   }
 }
 
+export const RANGE_LIMIT = 1000;
+
+/** 기간 조회에 쓰는 부분만 (진료 준비 화면) */
+export interface RangeClient {
+  from(table: "checkins"): {
+    select(columns: string): {
+      gte(
+        column: "occurred_at",
+        value: string,
+      ): {
+        lt(
+          column: "occurred_at",
+          value: string,
+        ): {
+          order(column: "occurred_at", opts: { ascending: boolean }): { limit(n: number): PromiseLike<Result<unknown[]>> };
+        };
+      };
+    };
+  };
+}
+
+export type RangeResult =
+  | { kind: "ok"; records: Checkin[]; /** 한도까지 꽉 차서 범위 안의 기록이 더 있을 수 있음 */ truncated: boolean }
+  | { kind: "error"; reason: FailReason };
+
+/** 경험한 시점이 [fromIso, toIso) 안인 기록. 오래된 순. RLS로 내 기록만 보인다. 쓰기 요청을 보내지 않는다. */
+export async function listCheckinsBetween(
+  client: RangeClient,
+  fromIso: string,
+  toIso: string,
+  limit = RANGE_LIMIT,
+): Promise<RangeResult> {
+  try {
+    const { data, error } = await client
+      .from("checkins")
+      .select("*")
+      .gte("occurred_at", fromIso)
+      .lt("occurred_at", toIso)
+      .order("occurred_at", { ascending: true })
+      .limit(limit);
+    if (error) return { kind: "error", reason: classifyError(error) };
+    const rows = data ?? [];
+    const records = rows.map(parseCheckin).filter((r): r is Checkin => r !== null);
+    return { kind: "ok", records, truncated: rows.length >= limit };
+  } catch {
+    return { kind: "error", reason: "network" };
+  }
+}
+
 export type GetResult = { kind: "found"; record: Checkin } | { kind: "missing" } | { kind: "error"; reason: FailReason };
 
 /** ID 하나만 조회한다. 쓰기 요청을 보내지 않는다. RLS로 내 기록만 보인다. */
