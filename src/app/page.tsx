@@ -1,5 +1,6 @@
 import Link from "next/link";
 import HomeCheckin from "@/components/HomeCheckin";
+import { bookingOpen } from "@/lib/launch";
 
 // 홈: 위쪽에서 버거움을 한 번 눌러 바로 남긴다(HomeCheckin). 아래는 다른 화면으로 가는 길.
 export default function Home() {
@@ -37,10 +38,12 @@ export default function Home() {
           <h2 id="explore" className="text-lg font-semibold">내 마음 알아보기</h2>
           <span aria-hidden="true" className="h-px flex-1 bg-line" />
         </div>
-        <a href="/booking" className="block rounded border border-line bg-surface p-5 hover:border-accent">
-          <p className="text-lg font-semibold">병원 예약 대본</p>
-          <p className="mt-1 text-muted">예약 전화에서 할 말을 순서대로 만들어요. 비용·진료 기록 걱정도 함께 풀어 봐요.</p>
-        </a>
+        {bookingOpen(process.env.VERCEL_ENV) ? (
+          <a href="/booking" className="block rounded border border-line bg-surface p-5 hover:border-accent">
+            <p className="text-lg font-semibold">병원 예약 대본</p>
+            <p className="mt-1 text-muted">예약 전화에서 할 말을 순서대로 만들어요. 비용·진료 기록 걱정도 함께 풀어 봐요.</p>
+          </a>
+        ) : null}
         <p className="rounded border border-dashed border-line p-5 text-muted">진료 준비(한 장 요약)는 다음 단계에서 열려요.</p>
       </section>
 
