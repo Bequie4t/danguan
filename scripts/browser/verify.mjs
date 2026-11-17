@@ -17,14 +17,14 @@ const { chromium } = process.env.TEST_PLAYWRIGHT_MODULE
 await build({
   absWorkingDir: root, entryPoints: [fixturePath], bundle: true,
   outfile: resolve(work, "fixture.js"), format: "iife", platform: "browser", jsx: "automatic",
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', "process.env.VERCEL_ENV": '"preview"' },
   plugins: [{ name: "isolated-browser-fixture", setup(b) {
     b.onResolve({ filter: /^@\/lib\/supabase\/(client|pinned)$/ }, () => ({ path: fixturePath }));
     b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "fixture" }));
     b.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: "navigation", namespace: "fixture" }));
     b.onLoad({ filter: /^link$/, namespace: "fixture" }, () => ({ contents: 'import React from "react"; export default function Link({children,...props}) { return React.createElement("a",props,children); }', loader: "js", resolveDir: root }));
     // 머리글 시험용: 지금 주소를 그대로 돌려준다
-    b.onLoad({ filter: /^navigation$/, namespace: "fixture" }, () => ({ contents: "export function usePathname() { return location.pathname; }", loader: "js", resolveDir: root }));
+    b.onLoad({ filter: /^navigation$/, namespace: "fixture" }, () => ({ contents: "export function usePathname() { return location.pathname; } export function notFound() { throw new Error(\"NEXT_NOT_FOUND\"); }", loader: "js", resolveDir: root }));
   } }],
 });
 const js = await readFile(resolve(work, "fixture.js"));
