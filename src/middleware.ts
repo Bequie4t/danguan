@@ -3,7 +3,7 @@ import { createServerClient } from "@supabase/ssr";
 import { supabaseEnv } from "@/lib/supabase/env";
 
 // 로그인이 필요한 화면
-const PROTECTED = ["/today", "/records", "/consent"];
+const PROTECTED = ["/today", "/records", "/consent", "/visit"];
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });

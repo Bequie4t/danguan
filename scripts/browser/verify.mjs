@@ -2031,6 +2031,137 @@ try {
       assert.ok(o1 <= 0 && o2 <= 0, `가로로 넘침: 적기 ${o1}px, 보기 ${o2}px`);
     });
 
+    // ── 진료 준비 메모 ──
+    // 기록의 시간대(Asia/Seoul)와 기기 시간대를 맞춰 날짜 경계가 흔들리지 않게 한다.
+    const visitContext = await browser.newContext({ viewport, timezoneId: "Asia/Seoul" });
+    const vp = await visitContext.newPage();
+    vp.setDefaultTimeout(10000);
+    vp.on("pageerror", (e) => errors.push(e.message));
+    const memo = () => vp.locator("article");
+    const loaded = () => memo().getByText(/^(기록이 없는 날 \d+일|이 기간에 남긴 기록이 없어요\.)$/).waitFor();
+    const openVisit = async (setup) => {
+      await vp.goto(`${base}/?screen=visit`);
+      await vp.getByRole("heading", { name: "진료 준비 메모", exact: true }).waitFor();
+      if (setup) {
+        await vp.evaluate(setup);
+        await vp.evaluate(() => window.__fixture.mount("visit"));
+        await vp.getByRole("heading", { name: "진료 준비 메모", exact: true }).waitFor();
+      }
+      await loaded();
+    };
+    const seedVisit = () => {
+      const f = window.__fixture;
+      const ago = (d) => new Date(Date.now() - d * 86400000).toISOString();
+      f.addRecord(f.A, "0000000000d1", "okay", ago(2), { tags: ["meal", "sleep"], note: "가상 메모 둘" });
+      f.addRecord(f.A, "0000000000d2", "heavy", ago(3), { tags: ["sleep"], source: "recall" });
+      f.addRecord(f.A, "0000000000d3", "very_heavy", ago(40), { note: "가상 기간 밖 메모" });
+      f.addRecord(f.B, "0000000000d4", "very_heavy", ago(1), { note: "가상 B 메모" });
+    };
+
+    await scenario("진료 메모: 내 기록만 기간 안에서 세고(평균 없음), 기록 메모는 고른 것만, 쓴 글은 서버로 보내지 않음", async () => {
+      await openVisit(seedVisit);
+      const text = async () => (await memo().textContent()).replace(/\s+/g, " ");
+      let t = await text();
+      assert.ok(t.includes("기간 28일 중 기록한 날 3일, 기록 3개"), t);
+      assert.ok(t.includes("기록이 없는 날 25일"), t);
+      assert.ok(t.includes("지금 기록 2개 · 돌아보며 기록 1개"), t);
+      const row = (label) => memo().locator("tr", { has: vp.getByRole("rowheader", { name: label, exact: true }) });
+      assert.equal((await row("버거워요").textContent()).replace(/\s+/g, ""), "버거워요2개2일");
+      assert.equal((await row("괜찮은 편이에요").textContent()).replace(/\s+/g, ""), "괜찮은편이에요1개1일");
+      assert.equal((await row("많이 버거워요").textContent()).replace(/\s+/g, ""), "많이버거워요0개0일");
+      assert.ok(t.includes("잠 — 기록 2개 (2일)") && t.includes("식사 — 기록 1개 (1일)"), t);
+      // 다른 계정·기간 밖 기록은 어디에도 없다
+      const body = await vp.locator("body").textContent();
+      assert.ok(!body.includes("가상 B 메모") && !body.includes("가상 B 기록") && !body.includes("가상 기간 밖 메모"));
+      // 기록 메모: 처음엔 메모에 없음 → 고르면 들어감
+      assert.ok(!t.includes("가상 메모 둘"));
+      await vp.getByRole("checkbox", { name: /가상 메모 둘/ }).check();
+      assert.ok((await text()).includes("가상 메모 둘"));
+      // 날짜별 기록은 처음엔 빠져 있고, 켜면 들어감
+      assert.equal(await memo().getByRole("heading", { name: "날짜별 기록" }).count(), 0);
+      await vp.getByRole("checkbox", { name: "날짜별 기록", exact: true }).check();
+      await memo().getByRole("heading", { name: "날짜별 기록" }).waitFor();
+      assert.ok((await text()).includes("버거워요 (돌아보며 기록)"));
+      // 쓰기 → 메모에 반영, 부분 끄기
+      await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가상 불편함");
+      await vp.getByRole("textbox", { name: "진료 때 묻고 싶은 것" }).fill("가상 질문입니다");
+      await vp.getByRole("textbox", { name: "진료 때 묻고 싶은 것" }).press("Enter");
+      t = await text();
+      assert.ok(t.includes("가상 불편함") && t.includes("가상 질문입니다"), t);
+      assert.equal(await vp.getByRole("textbox", { name: "진료 때 묻고 싶은 것" }).inputValue(), "");
+      await vp.getByRole("checkbox", { name: "요즘 가장 불편한 점", exact: true }).uncheck();
+      assert.ok(!(await text()).includes("가상 불편함"));
+      // 기간 1주 → 다시 셈 (조회만)
+      await vp.getByRole("radio", { name: "지난 1주" }).check();
+      await memo().getByText("기간 7일 중", { exact: false }).waitFor();
+      // 직접 고르기: 거꾸로 고르면 알림, 조회하지 않음
+      await vp.getByRole("radio", { name: "직접 고르기" }).check();
+      await vp.getByLabel("시작 날짜").fill("2099-01-02");
+      await vp.getByLabel("끝 날짜").fill("2099-01-01");
+      await vp.getByText("시작 날짜가 끝 날짜보다 늦어요.", { exact: false }).waitFor();
+      const calls = await vp.evaluate(() => window.__fixture.snapshot().calls);
+      const A = await vp.evaluate(() => window.__fixture.A);
+      assert.ok(calls.length > 0 && calls.every((c) => c.operation === "checkins_range" && c.uid === A), `조회만, A 인증으로만: ${JSON.stringify(calls)}`);
+      assert.ok(!JSON.stringify(calls).includes("가상 불편함") && !JSON.stringify(calls).includes("가상 질문"), "쓴 글은 요청에 없음");
+    });
+
+    await scenario("진료 메모: 인쇄하면 조작 부분은 빠지고 메모만, 인쇄 버튼은 브라우저 인쇄를 연다", async () => {
+      await openVisit(seedVisit);
+      await vp.evaluate(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
+      await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가상 인쇄 확인");
+      await vp.getByRole("button", { name: "인쇄하기" }).click();
+      assert.equal(await vp.evaluate(() => window.__printed), 1);
+      await vp.emulateMedia({ media: "print" });
+      assert.equal(await vp.getByRole("button", { name: "인쇄하기" }).isVisible(), false);
+      assert.equal(await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).isVisible(), false);
+      assert.equal(await memo().isVisible(), true);
+      assert.ok((await memo().textContent()).includes("가상 인쇄 확인"));
+      // 어두운 테마 기기에서도 인쇄는 흰 바탕
+      await vp.emulateMedia({ media: "print", colorScheme: "dark" });
+      const bg = await vp.evaluate(() => getComputedStyle(document.querySelector("article")).backgroundColor);
+      assert.equal(bg, "rgb(255, 255, 255)");
+      await vp.emulateMedia({ media: "screen", colorScheme: "light" });
+    });
+
+    await scenario("진료 메모: 불러오기 실패 → 알림과 다시 불러오기, 쓴 글은 그대로", async () => {
+      await vp.goto(`${base}/?screen=visit`);
+      await vp.getByRole("heading", { name: "진료 준비 메모", exact: true }).waitFor();
+      await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가상 유지 확인");
+      await vp.evaluate(() => { window.__fixture.failure = "range_error"; });
+      await vp.getByRole("radio", { name: "지난 2주" }).check();
+      await vp.getByText("기록을 불러오지 못했어요.", { exact: false }).waitFor();
+      await vp.getByRole("button", { name: "다시 불러오기" }).click();
+      await memo().getByText("기간 14일 중", { exact: false }).waitFor();
+      assert.equal(await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).inputValue(), "가상 유지 확인");
+    });
+
+    await scenario("진료 메모: 다른 계정으로 바뀌면 쓴 글·고른 메모가 남지 않고 그 계정 기록만", async () => {
+      await openVisit(seedVisit);
+      await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가상 A의 글");
+      await vp.getByRole("checkbox", { name: /가상 메모 둘/ }).check();
+      await vp.evaluate(() => window.__fixture.switchUser(window.__fixture.B));
+      await vp.waitForFunction(() => document.querySelector(`[data-scope-uid="${window.__fixture.B}"]`) !== null);
+      await loaded();
+      assert.equal(await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).inputValue(), "");
+      const body = await vp.locator("body").textContent();
+      assert.ok(!body.includes("가상 A의 글") && !body.includes("가상 메모 둘") && !body.includes("가상 A 기록"));
+      assert.ok(body.includes("가상 B 메모"));
+      await vp.evaluate(() => window.__fixture.switchUser(window.__fixture.A));
+    });
+
+    await scenario("진료 메모: 200% 확대(폭 절반)에서도 가로로 넘치지 않음", async () => {
+      await vp.setViewportSize({ width: Math.floor(viewport.width / 2), height: viewport.height });
+      await openVisit(seedVisit);
+      await vp.getByRole("checkbox", { name: "날짜별 기록", exact: true }).check();
+      await vp.getByRole("textbox", { name: "요즘 가장 불편한 점" }).fill("가".repeat(300));
+      await vp.getByRole("textbox", { name: "진료 때 묻고 싶은 것" }).fill("나".repeat(150));
+      await vp.getByRole("textbox", { name: "진료 때 묻고 싶은 것" }).press("Enter");
+      const over = await vp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await vp.setViewportSize(viewport);
+      assert.ok(over <= 0, `가로로 넘침 ${over}px`);
+    });
+    await visitContext.close();
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
