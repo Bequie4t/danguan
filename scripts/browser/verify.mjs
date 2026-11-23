@@ -2031,6 +2031,157 @@ try {
       assert.ok(o1 <= 0 && o2 <= 0, `가로로 넘침: 적기 ${o1}px, 보기 ${o2}px`);
     });
 
+    // ── 오늘 최소한: 이 기기에만 저장, 한 것만 표시 ──
+    const MIN_KEY = "404blue.minimum.v1";
+    const openMin = async (p = page) => {
+      await p.goto(`${base}/?screen=minimum`);
+      await p.getByRole("heading", { name: "오늘 최소한", exact: true }).waitFor();
+    };
+    const item = (name, p = page) => p.getByRole("button", { name, exact: true });
+    const pressed = async (name, p = page) => (await item(name, p).getAttribute("aria-pressed")) === "true";
+    const minStored = (p = page) => p.evaluate((k) => JSON.parse(localStorage.getItem(k) ?? "null"), MIN_KEY);
+    const today = () => page.evaluate(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; });
+
+    await scenario("오늘 최소한: 누르면 '했어요', 다시 누르면 해제, 새로 열어도 유지, 개수·안 한 것 표시 없음, 서버 요청 없음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      const requests = [];
+      const onReq = (r) => {
+        if (isOwnFontRequest(r, base)) return;
+        if (!/\/(fixture\.js|style\.css)|\?screen=minimum$/.test(r.url())) requests.push(`${r.method()} ${r.url()}`);
+      };
+      page.on("request", onReq);
+      await openMin();
+      for (const n of ["물 마시기", "뭐라도 먹기", "약 먹기", "세수하기"]) assert.equal(await pressed(n), false, n);
+      await item("물 마시기").click();
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') !== null);
+      assert.equal(await pressed("물 마시기"), true);
+      assert.ok((await item("물 마시기").textContent()).includes("했어요"));
+      await item("세수하기").click();
+      await page.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 2);
+      await item("세수하기").click();
+      await page.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 1);
+      const st = await minStored();
+      assert.deepEqual(st.checks, { date: await today(), done: ["water"] });
+      await openMin();
+      assert.equal(await pressed("물 마시기"), true);
+      assert.equal(await pressed("세수하기"), false);
+      const body = await page.locator("#root").innerText();
+      assert.ok(!/\d+\s*\/\s*\d+|\d+\s*개|못 했|안 했|연속|%/.test(body), `개수·평가 표시 없음: ${body}`);
+      // 키보드로도 켜고 끈다
+      await item("약 먹기").focus();
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 2);
+      page.off("request", onReq);
+      assert.deepEqual(requests, [], "서버 요청 없음");
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("오늘 최소한: 어제 체크는 오늘 보이지 않고 저장에도 남지 않음, 화면을 켜 둔 채 날이 바뀌어도 비워짐", async () => {
+      await page.goto(`${base}/?screen=form`);
+      await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ version: 1, items: [{ id: "water", label: "물 마시기" }, { id: "eat", label: "뭐라도 먹기" }], checks: { date: "2000-01-01", done: ["water", "eat"] } })), MIN_KEY);
+      await openMin();
+      assert.equal(await pressed("물 마시기"), false);
+      assert.equal(await pressed("뭐라도 먹기"), false);
+      await item("뭐라도 먹기").click();
+      await page.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 1);
+      const st = await minStored();
+      assert.deepEqual(st.checks, { date: await today(), done: ["eat"] });
+      assert.ok(!JSON.stringify(st).includes("2000-01-01"));
+      // 켜 둔 채 날이 바뀜: 시계를 하루 뒤로 돌리고 창에 돌아옴
+      await page.evaluate(() => { const real = Date.now(); const D = Date; window.Date = class extends D { constructor(...a) { super(...(a.length ? a : [real + 86400000])); } static now() { return real + 86400000; } }; window.dispatchEvent(new Event("focus")); });
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') === null);
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("오늘 최소한: 다른 창에서 누른 체크가 이 창에 보이고, 두 창에서 다른 항목을 눌러도 둘 다 남음", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openMin();
+      const other = await context.newPage();
+      other.on("pageerror", (e) => errors.push(e.message));
+      await openMin(other);
+      await item("물 마시기", other).click();
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') !== null);
+      assert.equal(await pressed("물 마시기"), true, "이 창에 반영");
+      await item("약 먹기").click();
+      await other.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 2);
+      assert.deepEqual((await minStored()).checks.done.sort(), ["meds", "water"]);
+      await other.close();
+      await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("오늘 최소한: 항목 고치기(이름 바꾸기·빼기·더하기) → 체크는 남은 항목만 유지, 지우기 확인은 '취소'에 초점, 지우면 기본 항목", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await openMin();
+      await item("물 마시기").click();
+      await item("약 먹기").click();
+      await page.waitForFunction(() => document.querySelectorAll('button[aria-pressed="true"]').length === 2);
+      await page.getByRole("button", { name: "항목 고치기" }).click();
+      await page.getByLabel("항목 1", { exact: true }).fill("물 한 잔");
+      await page.getByRole("button", { name: "항목 3 빼기" }).click();
+      await page.getByRole("button", { name: "항목 더하기" }).click();
+      await page.getByLabel("항목 4", { exact: true }).fill("창문 열기");
+      await page.getByRole("button", { name: "항목 더하기" }).click(); // 빈 칸은 저장할 때 빠짐
+      await page.getByRole("button", { name: "저장하기" }).click();
+      await page.getByText("항목을 저장했어요.", { exact: true }).waitFor();
+      await page.waitForFunction(() => document.activeElement?.textContent === "항목 고치기", null, { timeout: 2000 });
+      const labels = await page.locator("#root ul button[aria-pressed]").allTextContents();
+      assert.deepEqual(labels.map((t) => t.replace("✓ 했어요", "").trim()), ["물 한 잔", "뭐라도 먹기", "세수하기", "창문 열기"]);
+      assert.equal(await pressed("물 한 잔"), true, "이름만 바꾼 항목은 체크 유지");
+      assert.deepEqual((await minStored()).checks.done, ["water"], "뺀 항목(약 먹기)의 체크는 사라짐");
+      // 지우기: 확인을 열면 초점은 '취소'
+      await page.getByRole("button", { name: "항목 고치기" }).click();
+      await page.getByRole("button", { name: "이 기기에서 모두 지우기" }).click();
+      await page.waitForFunction(() => document.activeElement?.textContent === "취소" && document.activeElement.closest('[role="group"]'));
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.activeElement?.textContent === "이 기기에서 모두 지우기", null, { timeout: 2000 });
+      assert.ok((await minStored()) !== null, "취소하면 그대로");
+      await page.getByRole("button", { name: "이 기기에서 모두 지우기" }).click();
+      await page.getByRole("group", { name: "모두 지우기 확인" }).getByRole("button", { name: "지우기" }).click();
+      await page.getByText("이 기기에서 지웠어요.", { exact: false }).waitFor();
+      assert.equal(await minStored(), null);
+      assert.equal(await pressed("물 마시기"), false);
+      // 고치기 취소는 아무것도 바꾸지 않음
+      await page.getByRole("button", { name: "항목 고치기" }).click();
+      await page.getByLabel("항목 1", { exact: true }).fill("바꿨다가 취소");
+      await page.getByRole("button", { name: "취소", exact: true }).click();
+      await item("물 마시기").waitFor();
+      assert.equal(await minStored(), null);
+    });
+
+    await scenario("오늘 최소한: 저장소를 못 쓰면 알리고 이번에만 표시, 손상된 값은 덮어쓰지 않고 다시 시작을 고르게 함", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await page.evaluate((k) => localStorage.setItem(k, "{손상"), MIN_KEY);
+      await openMin();
+      await page.getByText("이 기기에 저장된 내용을 읽을 수 없어서", { exact: false }).waitFor();
+      assert.equal(await page.evaluate((k) => localStorage.getItem(k), MIN_KEY), "{손상");
+      await page.getByRole("button", { name: "기본 항목으로 다시 시작하기" }).click();
+      await item("물 마시기").click();
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') !== null);
+      assert.deepEqual((await minStored()).checks.done, ["water"]);
+      // 저장소 자체를 못 씀
+      await page.evaluate(() => { Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new Error("SecurityError"); } }); window.__fixture.mount("minimum"); });
+      await page.getByText("이 브라우저에서는 저장할 수 없어서", { exact: false }).waitFor();
+      await item("세수하기").click();
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') !== null);
+      assert.equal(await pressed("세수하기"), true);
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+    });
+
+    await scenario("오늘 최소한: 200% 확대(폭 절반)에서도 가로로 넘치지 않고, 버튼은 엄지로 누르기 넉넉함(높이 64px 이상)", async () => {
+      await page.goto(`${base}/?screen=form`); await page.evaluate(() => localStorage.clear());
+      await page.setViewportSize({ width: Math.floor(viewport.width / 2), height: viewport.height });
+      await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ version: 1, items: [{ id: "my-a", label: "가".repeat(20) }, { id: "water", label: "물 마시기" }], checks: { date: "2000-01-01", done: [] } })), MIN_KEY);
+      await openMin();
+      await item("가".repeat(20)).click();
+      await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]') !== null);
+      const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      const h = await item("물 마시기").evaluate((el) => el.getBoundingClientRect().height);
+      await page.setViewportSize(viewport);
+      await page.evaluate(() => localStorage.clear());
+      assert.ok(over <= 0, `가로로 넘침 ${over}px`);
+      assert.ok(h >= 64, `버튼 높이 ${h}px`);
+    });
+
     await scenario("로그아웃하면 이전 계정 화면에서 빠져나옴", async () => {
       await fresh("records");
       await page.evaluate(() => window.__fixture.switchUser(null));
